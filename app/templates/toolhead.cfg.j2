@@ -1,0 +1,11 @@
+{% if toolhead_profile %}
+[mcu toolhead]
+canbus_uuid: {{ override("toolhead.canbus_uuid", project.toolhead.canbus_uuid or "replace-with-canbus-uuid") }}
+
+[temperature_sensor toolhead_mcu]
+sensor_type: temperature_mcu
+sensor_mcu: toolhead
+min_temp: 0
+max_temp: 100
+{% endif %}
+

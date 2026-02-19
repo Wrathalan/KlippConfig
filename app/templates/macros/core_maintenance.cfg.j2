@@ -1,0 +1,16 @@
+[gcode_macro MAINTENANCE_WARMUP]
+description: Warm up bed and nozzle for maintenance tasks
+gcode:
+  M140 S60
+  M104 S170
+  M190 S60
+  M109 S170
+
+[gcode_macro CLEAN_NOZZLE]
+description: Run safe nozzle cleanup routine
+gcode:
+  G90
+  G1 X10 Y10 Z10 F9000
+  G1 X{{ override("macro.clean.x2", 40) }} Y10 F6000
+  G1 X10 Y10 F6000
+

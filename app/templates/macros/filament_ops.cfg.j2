@@ -1,0 +1,16 @@
+[gcode_macro LOAD_FILAMENT]
+description: Controlled filament load routine
+gcode:
+  M109 S{{ override("macro.load_filament.temp", 220) }}
+  G91
+  G1 E60 F300
+  G90
+
+[gcode_macro UNLOAD_FILAMENT]
+description: Controlled filament unload routine
+gcode:
+  M109 S{{ override("macro.unload_filament.temp", 220) }}
+  G91
+  G1 E-80 F900
+  G90
+

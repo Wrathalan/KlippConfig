@@ -1,0 +1,12 @@
+[gcode_macro PREP_QGL]
+description: Prepare machine for quad gantry level routine
+gcode:
+  {% if project.probe.enabled %}
+  G28
+  BED_MESH_CLEAR
+  QUAD_GANTRY_LEVEL
+  G28 Z
+  {% else %}
+  RESPOND TYPE=error MSG="Probe required for QGL helpers."
+  {% endif %}
+

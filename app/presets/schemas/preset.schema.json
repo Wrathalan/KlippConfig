@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klippconfig.local/schema/preset.schema.json",
+  "title": "KlippConfig Preset",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "family",
+    "kinematics",
+    "build_volume",
+    "supported_boards",
+    "defaults",
+    "feature_flags",
+    "templates"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 3
+    },
+    "family": {
+      "type": "string",
+      "enum": ["voron"]
+    },
+    "kinematics": {
+      "type": "string",
+      "enum": ["corexy", "cartesian"]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "build_volume": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "integer", "minimum": 50 },
+        "y": { "type": "integer", "minimum": 50 },
+        "z": { "type": "integer", "minimum": 50 }
+      }
+    },
+    "supported_boards": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "supported_toolhead_boards": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "supported_addons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["ams_lite", "ercf_v2", "box_turtle", "trad_rack", "filament_buffer"]
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "required": ["max_velocity", "max_accel", "square_corner_velocity"],
+      "additionalProperties": false,
+      "properties": {
+        "max_velocity": { "type": "integer", "minimum": 50 },
+        "max_accel": { "type": "integer", "minimum": 200 },
+        "square_corner_velocity": { "type": "number", "minimum": 0.5 }
+      }
+    },
+    "feature_flags": {
+      "type": "object",
+      "required": ["probe_optional", "input_shaper_optional", "macros_supported"],
+      "additionalProperties": false,
+      "properties": {
+        "probe_optional": { "type": "boolean" },
+        "input_shaper_optional": { "type": "boolean" },
+        "macros_supported": { "type": "boolean" }
+      }
+    },
+    "templates": {
+      "type": "object",
+      "required": ["printer", "mcu", "motion", "thermal"],
+      "additionalProperties": false,
+      "properties": {
+        "printer": { "type": "string", "minLength": 1 },
+        "mcu": { "type": "string", "minLength": 1 },
+        "motion": { "type": "string", "minLength": 1 },
+        "thermal": { "type": "string", "minLength": 1 }
+      }
+    },
+    "board_profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["label", "mcu", "serial_hint", "pins"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string", "minLength": 2 },
+          "mcu": { "type": "string", "minLength": 3 },
+          "serial_hint": { "type": "string", "minLength": 3 },
+          "pins": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": { "type": "string", "minLength": 2 }
+          },
+          "layout": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "recommended_probe_types": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 2 }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}
+
+

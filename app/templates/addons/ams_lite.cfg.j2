@@ -1,0 +1,25 @@
+[manual_stepper ams_lite_feeder]
+step_pin: {{ override("addon.ams_lite.step_pin", pins.ams_step) }}
+dir_pin: {{ override("addon.ams_lite.dir_pin", pins.ams_dir) }}
+enable_pin: {{ override("addon.ams_lite.enable_pin", pins.ams_enable) }}
+rotation_distance: {{ override("addon.ams_lite.rotation_distance", 22.678) }}
+microsteps: {{ override("addon.ams_lite.microsteps", 16) }}
+
+[gcode_macro AMS_LITE_LOAD]
+description: Basic AMS-style load routine for single-nozzle multi-spool systems
+gcode:
+  RESPOND MSG="AMS Lite load sequence started"
+  M117 AMS Lite Load
+  G91
+  G1 E{{ override("addon.ams_lite.load_mm", 80) }} F{{ override("addon.ams_lite.feedrate", 400) }}
+  G90
+
+[gcode_macro AMS_LITE_UNLOAD]
+description: Basic AMS-style unload routine
+gcode:
+  RESPOND MSG="AMS Lite unload sequence started"
+  M117 AMS Lite Unload
+  G91
+  G1 E-{{ override("addon.ams_lite.unload_mm", 90) }} F{{ override("addon.ams_lite.feedrate", 400) }}
+  G90
+

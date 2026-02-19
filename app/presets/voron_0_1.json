@@ -1,0 +1,65 @@
+{
+  "id": "voron_0_1",
+  "name": "Voron 0.1",
+  "family": "voron",
+  "kinematics": "corexy",
+  "version": 1,
+  "build_volume": {
+    "x": 120,
+    "y": 120,
+    "z": 120
+  },
+  "supported_boards": [
+    "btt_octopus_1_1",
+    "btt_octopus_pro_1_1",
+    "manta_m8p_v2",
+    "manta_m5p_v1_0",
+    "btt_kraken",
+    "fysetc_spider_v2",
+    "skr3_ez",
+    "duet3_mini_5plus",
+    "skr_pico",
+    "skr_mini_e3_v3"
+  ],
+  "defaults": {
+    "max_velocity": 250,
+    "max_accel": 6000,
+    "square_corner_velocity": 5.0
+  },
+  "feature_flags": {
+    "probe_optional": true,
+    "input_shaper_optional": true,
+    "macros_supported": true
+  },
+  "templates": {
+    "printer": "printer.cfg.j2",
+    "mcu": "mcu.cfg.j2",
+    "motion": "motion_corexy.cfg.j2",
+    "thermal": "thermal.cfg.j2"
+  },
+  "recommended_probe_types": [
+    "tap",
+    "bltouch",
+    "inductive"
+  ],
+  "notes": "Small-format Voron profile with conservative startup defaults.",
+  "supported_toolhead_boards": [
+    "btt_ebb36_v1_2",
+    "btt_ebb42_v1_2",
+    "btt_ebb_sb2209_2240",
+    "btt_ebb2240_v1_0",
+    "ldo_nitehawk_sb",
+    "ldo_nitehawk_36",
+    "mellow_fly_sht36_v2",
+    "mellow_fly_sht42_v2",
+    "fysetc_sb_can_2040"
+  ],
+  "supported_addons": [
+    "ams_lite",
+    "ercf_v2",
+    "box_turtle",
+    "trad_rack",
+    "filament_buffer"
+  ]
+}
+

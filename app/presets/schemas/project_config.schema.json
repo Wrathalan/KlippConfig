@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klippconfig.local/schema/project_config.schema.json",
+  "title": "KlippConfig Project Config",
+  "type": "object",
+  "required": [
+    "preset_id",
+    "board",
+    "dimensions",
+    "probe",
+    "thermistors",
+    "motion_profile",
+    "macro_packs",
+    "addons",
+    "toolhead",
+    "leds",
+    "advanced_overrides"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "preset_id": {
+      "type": "string",
+      "minLength": 3
+    },
+    "board": {
+      "type": "string",
+      "minLength": 3
+    },
+    "dimensions": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "integer", "minimum": 50 },
+        "y": { "type": "integer", "minimum": 50 },
+        "z": { "type": "integer", "minimum": 50 }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "required": ["enabled", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "type": { "type": ["string", "null"] }
+      }
+    },
+    "thermistors": {
+      "type": "object",
+      "required": ["hotend", "bed"],
+      "additionalProperties": false,
+      "properties": {
+        "hotend": { "type": "string", "minLength": 3 },
+        "bed": { "type": "string", "minLength": 3 }
+      }
+    },
+    "motion_profile": {
+      "type": "string",
+      "const": "safe"
+    },
+    "macro_packs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["core_maintenance", "qgl_helpers", "filament_ops"]
+      }
+    },
+    "addons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["ams_lite", "ercf_v2", "box_turtle", "trad_rack", "filament_buffer"]
+      }
+    },
+    "toolhead": {
+      "type": "object",
+      "required": ["enabled", "board", "canbus_uuid"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "board": { "type": ["string", "null"], "minLength": 3 },
+        "canbus_uuid": { "type": ["string", "null"], "minLength": 4 }
+      }
+    },
+    "leds": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "pin",
+        "chain_count",
+        "color_order",
+        "initial_red",
+        "initial_green",
+        "initial_blue"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "pin": { "type": ["string", "null"], "minLength": 2 },
+        "chain_count": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "color_order": {
+          "type": "string",
+          "enum": ["RGB", "GRB", "BRG", "BGR"]
+        },
+        "initial_red": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "initial_green": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "initial_blue": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+    "advanced_overrides": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean"]
+      }
+    }
+  }
+}
+
+

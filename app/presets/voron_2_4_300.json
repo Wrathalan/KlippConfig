@@ -1,0 +1,65 @@
+{
+  "id": "voron_2_4_300",
+  "name": "Voron 2.4 300",
+  "family": "voron",
+  "kinematics": "corexy",
+  "version": 1,
+  "build_volume": {
+    "x": 300,
+    "y": 300,
+    "z": 300
+  },
+  "supported_boards": [
+    "btt_octopus_1_1",
+    "btt_octopus_pro_1_1",
+    "manta_m8p_v2",
+    "manta_m5p_v1_0",
+    "btt_kraken",
+    "fysetc_spider_v2",
+    "skr3_ez",
+    "duet3_mini_5plus",
+    "skr_pico",
+    "skr_mini_e3_v3"
+  ],
+  "defaults": {
+    "max_velocity": 350,
+    "max_accel": 10000,
+    "square_corner_velocity": 5.0
+  },
+  "feature_flags": {
+    "probe_optional": true,
+    "input_shaper_optional": true,
+    "macros_supported": true
+  },
+  "templates": {
+    "printer": "printer.cfg.j2",
+    "mcu": "mcu.cfg.j2",
+    "motion": "motion_corexy.cfg.j2",
+    "thermal": "thermal.cfg.j2"
+  },
+  "recommended_probe_types": [
+    "tap",
+    "inductive",
+    "bltouch"
+  ],
+  "notes": "Voron 2.4 300 profile with conservative acceleration for v1.",
+  "supported_toolhead_boards": [
+    "btt_ebb36_v1_2",
+    "btt_ebb42_v1_2",
+    "btt_ebb_sb2209_2240",
+    "btt_ebb2240_v1_0",
+    "ldo_nitehawk_sb",
+    "ldo_nitehawk_36",
+    "mellow_fly_sht36_v2",
+    "mellow_fly_sht42_v2",
+    "fysetc_sb_can_2040"
+  ],
+  "supported_addons": [
+    "ams_lite",
+    "ercf_v2",
+    "box_turtle",
+    "trad_rack",
+    "filament_buffer"
+  ]
+}
+

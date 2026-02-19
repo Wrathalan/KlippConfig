@@ -1,0 +1,16 @@
+[gcode_macro TRADRACK_SELECT]
+description: Trad Rack lane selection placeholder
+gcode:
+  RESPOND MSG="Trad Rack select lane {{ override('addon.trad_rack.default_lane', 1) }}"
+  M117 Trad Rack Select
+  G4 P350
+
+[gcode_macro TRADRACK_UNLOAD]
+description: Trad Rack unload helper
+gcode:
+  RESPOND MSG="Trad Rack unload"
+  M117 Trad Rack Unload
+  G91
+  G1 E-{{ override("addon.trad_rack.unload_mm", 95) }} F{{ override("addon.trad_rack.feedrate", 350) }}
+  G90
+

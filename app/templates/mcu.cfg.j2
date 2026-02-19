@@ -1,0 +1,10 @@
+[mcu]
+serial: {{ override("mcu.serial", board_profile.serial_hint if board_profile else "/dev/serial/by-id/usb-KlippConfig-UNKNOWN") }}
+restart_method: command
+
+[temperature_sensor mcu_temp]
+sensor_type: temperature_mcu
+min_temp: 0
+max_temp: 100
+
+

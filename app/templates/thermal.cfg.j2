@@ -1,0 +1,30 @@
+[extruder]
+heater_pin: {{ pins.heater_hotend }}
+sensor_pin: {{ pins.temp_hotend }}
+sensor_type: {{ project.thermistors.hotend }}
+control: pid
+pid_kp: {{ override("thermal.hotend.pid_kp", 21.0) }}
+pid_ki: {{ override("thermal.hotend.pid_ki", 1.2) }}
+pid_kd: {{ override("thermal.hotend.pid_kd", 92.0) }}
+min_temp: 0
+max_temp: {{ override("thermal.hotend.max_temp", 290) }}
+
+[heater_bed]
+heater_pin: {{ pins.heater_bed }}
+sensor_pin: {{ pins.temp_bed }}
+sensor_type: {{ project.thermistors.bed }}
+control: pid
+pid_kp: {{ override("thermal.bed.pid_kp", 54.0) }}
+pid_ki: {{ override("thermal.bed.pid_ki", 0.75) }}
+pid_kd: {{ override("thermal.bed.pid_kd", 980.0) }}
+min_temp: 0
+max_temp: {{ override("thermal.bed.max_temp", 120) }}
+
+[fan]
+pin: {{ override("thermal.part_cooling_fan_pin", pins.part_cooling_fan) }}
+
+[heater_fan hotend_fan]
+pin: {{ override("thermal.toolhead_fan_pin", pins.toolhead_fan) }}
+heater: extruder
+heater_temp: {{ override("thermal.toolhead_fan_temp", 50.0) }}
+

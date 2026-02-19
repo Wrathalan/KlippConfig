@@ -1,0 +1,15 @@
+[gcode_macro BOX_TURTLE_LOAD]
+description: BoxTurtle load helper
+gcode:
+  RESPOND MSG="BoxTurtle load helper"
+  M117 BoxTurtle Load
+  G91
+  G1 E{{ override("addon.box_turtle.load_mm", 60) }} F{{ override("addon.box_turtle.feedrate", 350) }}
+  G90
+
+[gcode_macro BOX_TURTLE_PARK]
+description: BoxTurtle parking helper
+gcode:
+  RESPOND MSG="BoxTurtle parking sequence"
+  M117 BoxTurtle Park
+

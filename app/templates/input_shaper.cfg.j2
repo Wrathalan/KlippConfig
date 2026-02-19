@@ -1,0 +1,9 @@
+# Placeholder for user measurements after first successful prints.
+# Run SHAPER_CALIBRATE after wiring and motion are verified.
+
+[input_shaper]
+shaper_type_x: {{ override("input_shaper.type_x", "mzv") }}
+shaper_freq_x: {{ override("input_shaper.freq_x", 45.0) }}
+shaper_type_y: {{ override("input_shaper.type_y", "mzv") }}
+shaper_freq_y: {{ override("input_shaper.freq_y", 40.0) }}
+

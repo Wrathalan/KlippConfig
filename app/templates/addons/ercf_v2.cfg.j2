@@ -1,0 +1,14 @@
+[gcode_macro ERCF_SYNC]
+description: Synchronize ERCF state with the printer
+gcode:
+  RESPOND MSG="ERCF v2 sync routine"
+  M117 ERCF Sync
+  G92 E0
+
+[gcode_macro ERCF_CHANGE_TOOL]
+description: Placeholder tool change flow for ERCF
+gcode:
+  RESPOND MSG="ERCF tool change to {{ override('addon.ercf_v2.default_tool', 0) }}"
+  M117 ERCF Tool Change
+  G4 P500
+

@@ -1,0 +1,45 @@
+# Board Layout
+
+## Mainboard
+
+- `{{ project.board }}`
+- Label: `{{ board_profile.label if board_profile else "Unknown" }}`
+- MCU: `{{ board_profile.mcu if board_profile else "Unknown" }}`
+
+### Mainboard Connectors
+{% if board_profile and board_profile.layout %}
+{% for section, connectors in board_profile.layout.items() %}
+- **{{ section }}:** {{ connectors | join(", ") }}
+{% endfor %}
+{% else %}
+- No layout metadata available.
+{% endif %}
+
+### Mainboard Pin Map
+{% if board_profile %}
+{% for pin_name, pin_value in board_profile.pins|dictsort %}
+- `{{ pin_name }}` -> `{{ pin_value }}`
+{% endfor %}
+{% else %}
+- No mainboard pin map available.
+{% endif %}
+
+## Toolhead Board
+
+- Enabled: `{{ "yes" if project.toolhead.enabled else "no" }}`
+- Board: `{{ project.toolhead.board or "none" }}`
+
+{% if project.toolhead.enabled and toolhead_profile %}
+### Toolhead Connectors
+{% if toolhead_profile.layout %}
+{% for section, connectors in toolhead_profile.layout.items() %}
+- **{{ section }}:** {{ connectors | join(", ") }}
+{% endfor %}
+{% endif %}
+
+### Toolhead Pin Map
+{% for pin_name, pin_value in toolhead_profile.pins|dictsort %}
+- `{{ pin_name }}` -> `{{ pin_value }}`
+{% endfor %}
+{% endif %}
+

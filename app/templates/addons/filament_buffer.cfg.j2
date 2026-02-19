@@ -1,0 +1,8 @@
+[filament_switch_sensor filament_buffer]
+switch_pin: {{ override("addon.filament_buffer.switch_pin", pins.filament_sensor) }}
+pause_on_runout: {{ override("addon.filament_buffer.pause_on_runout", True) }}
+runout_gcode:
+  RESPOND MSG="Filament buffer sensor triggered"
+insert_gcode:
+  RESPOND MSG="Filament inserted"
+
