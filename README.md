@@ -41,24 +41,12 @@ pip install -e .[dev]
 pythonw -m app.main
 ```
 
-`pythonw` launches without a visible terminal window.
-
 Alternative launcher:
 
 ```powershell
 .\scripts\run_klippconfig.ps1
 ```
 
-## UI Scaling
-
-- In-app: `View -> UI Scale` (`Auto`, `85%`, `90%`, `100%`, `110%`, `125%`, `150%`)
-- The selected UI scale is saved per user and reused on next launch.
-- Startup override (useful for recovery/testing):
-
-```powershell
-$env:KLIPPCONFIG_UI_SCALE="90"
-.\scripts\run_klippconfig.ps1
-```
 
 ## Tests
 
