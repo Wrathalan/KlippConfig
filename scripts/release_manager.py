@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -23,9 +24,11 @@ from app.services.release_versioning import (
     replace_inno_version,
     replace_pyproject_version,
 )
+from app.services.discord_webhook import post_discord_webhook
 
 
 DEFAULT_DISCORD_URL = "https://discord.gg/bbnAtfbY5C"
+DISCORD_WEBHOOK_ENV = "KLIPPCONFIG_DISCORD_WEBHOOK"
 
 
 def _repo_root() -> Path:
@@ -57,6 +60,16 @@ def _infer_github_repo(default: str = "Wrathalan/KlippConfig") -> str:
 def _write_text(path: Path, contents: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents, encoding="utf-8")
+
+
+def _resolve_discord_webhook(cli_value: str | None) -> str | None:
+    provided = (cli_value or "").strip()
+    if provided:
+        return provided
+    env_value = (os.getenv(DISCORD_WEBHOOK_ENV) or "").strip()
+    if env_value:
+        return env_value
+    return None
 
 
 def cmd_show(_args: argparse.Namespace) -> int:
@@ -139,6 +152,14 @@ def cmd_bump(args: argparse.Namespace) -> int:
         print(f"Would update: {changelog_path}")
         print(f"Would write:  {github_path}")
         print(f"Would write:  {discord_path}")
+        if args.publish_discord:
+            webhook = _resolve_discord_webhook(args.discord_webhook_url)
+            if webhook:
+                print("Would publish Discord announcement via webhook.")
+            else:
+                print(
+                    f"Would fail Discord publish: provide --discord-webhook-url or {DISCORD_WEBHOOK_ENV}."
+                )
         return 0
 
     _write_text(pyproject_path, updated_pyproject)
@@ -155,6 +176,41 @@ def cmd_bump(args: argparse.Namespace) -> int:
     print(f"- {changelog_path.relative_to(root)}")
     print(f"- {github_path.relative_to(root)}")
     print(f"- {discord_path.relative_to(root)}")
+
+    if args.publish_discord:
+        webhook = _resolve_discord_webhook(args.discord_webhook_url)
+        if not webhook:
+            raise ValueError(
+                f"Discord publish requested, but no webhook was provided. "
+                f"Use --discord-webhook-url or set {DISCORD_WEBHOOK_ENV}."
+            )
+        count = post_discord_webhook(webhook, discord_announcement)
+        print(f"Discord announcement posted ({count} message chunk(s)).")
+    return 0
+
+
+def cmd_discord(args: argparse.Namespace) -> int:
+    root = _repo_root()
+    webhook = _resolve_discord_webhook(args.discord_webhook_url)
+    if not webhook:
+        raise ValueError(
+            f"Discord webhook URL is required. Use --discord-webhook-url or set {DISCORD_WEBHOOK_ENV}."
+        )
+
+    if args.file:
+        source = Path(args.file)
+        if not source.is_absolute():
+            source = root / source
+    elif args.version:
+        source = root / "release" / "announcements" / f"v{args.version}-discord.md"
+    else:
+        raise ValueError("Provide either --file or --version.")
+
+    if not source.exists():
+        raise FileNotFoundError(f"Discord announcement file not found: {source}")
+    content = source.read_text(encoding="utf-8")
+    count = post_discord_webhook(webhook, content)
+    print(f"Posted Discord announcement from {source.relative_to(root)} ({count} chunk(s)).")
     return 0
 
 
@@ -205,11 +261,48 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Discord invite URL (default: {DEFAULT_DISCORD_URL}).",
     )
     bump_parser.add_argument(
+        "--publish-discord",
+        action="store_true",
+        help="Post the generated Discord announcement to a webhook after bump.",
+    )
+    bump_parser.add_argument(
+        "--discord-webhook-url",
+        default=None,
+        help=(
+            "Discord webhook URL for announcement posting. "
+            f"Fallback env var: {DISCORD_WEBHOOK_ENV}."
+        ),
+    )
+    bump_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview changes without writing files.",
     )
     bump_parser.set_defaults(func=cmd_bump)
+
+    discord_parser = subparsers.add_parser(
+        "discord",
+        help="Publish an existing Discord announcement file via webhook.",
+    )
+    discord_parser.add_argument(
+        "--version",
+        default=None,
+        help="Announcement version to send (reads release/announcements/vX.Y.Z-discord.md).",
+    )
+    discord_parser.add_argument(
+        "--file",
+        default=None,
+        help="Explicit announcement file path to send.",
+    )
+    discord_parser.add_argument(
+        "--discord-webhook-url",
+        default=None,
+        help=(
+            "Discord webhook URL. "
+            f"Fallback env var: {DISCORD_WEBHOOK_ENV}."
+        ),
+    )
+    discord_parser.set_defaults(func=cmd_discord)
 
     return parser
 
