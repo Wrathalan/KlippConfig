@@ -139,29 +139,6 @@ Reference examples and format docs:
 3. Shows the creator icon from `assets\creator.ico`.
 4. Includes the Discord community link: https://discord.gg/bbnAtfbY5C
 
-## Release Webhook (Discord Releases Channel)
-
-Set the Discord webhook once as a user environment variable:
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-  "KLIPPCONFIG_DISCORD_WEBHOOK",
-  "https://discord.com/api/webhooks/<id>/<token>",
-  "User"
-)
-```
-
-Publish an existing release announcement:
-
-```powershell
-python .\scripts\release_manager.py discord --version 0.1.1
-```
-
-Generate a new release and publish the Discord post in one step:
-
-```powershell
-python .\scripts\release_manager.py bump --level patch --publish-discord --summary "Release summary" --highlight "Key change"
-```
 
 ## Windows Build
 
