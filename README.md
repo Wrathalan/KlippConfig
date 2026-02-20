@@ -1,5 +1,9 @@
 # KlippConfig
 
+## IMPORTANT NOTICE
+
+This project is a work in progress. Expect broken features, incomplete workflows, and frequent changes while development is ongoing.
+
 KlippConfig is a Windows-first desktop Klipper configurator built with Python and Qt.
 It generates full Klipper config packs from curated Voron presets.
 
@@ -119,4 +123,3 @@ Build output:
 - `dist\KlippConfig.exe` (self-contained, no console window)
 - Desktop shortcut `KlippConfig.lnk` (created by the build script)
 - Optional installer in `dist\installer` when Inno Setup (`iscc`) is on `PATH`
-
