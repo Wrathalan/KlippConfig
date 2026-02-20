@@ -1,5 +1,9 @@
 # KlippConfig
 
+<p>
+  <img src="assets/icon.ico" alt="KlippConfig app icon" width="96" height="96" />
+</p>
+
 ## IMPORTANT NOTICE
 
 This project is a work in progress. Expect broken features, incomplete workflows, and frequent changes while development is ongoing.
@@ -109,8 +113,9 @@ pytest
 ## About Tab
 
 1. Open the `About` tab for mission/context and platform overview.
-2. Includes the quote about easier "accasability" for controlling 3D printers and firmware.
+2. Includes the quote about easier "accessibility" for controlling 3D printers and firmware.
 3. Shows the creator icon from `assets\creator.ico`.
+4. Includes the Discord community link: https://discord.gg/cpwExmpC
 
 ## Windows Build
 

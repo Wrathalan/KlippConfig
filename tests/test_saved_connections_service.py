@@ -9,6 +9,7 @@ def test_saved_connections_save_load_and_delete(tmp_path) -> None:
         "host": "printer.local",
         "port": 22,
         "username": "pi",
+        "password": "supersecret",
         "key_path": "C:/Users/test/.ssh/id_ed25519",
         "remote_dir": "~/printer_data/config",
         "remote_file": "~/printer_data/config/printer.cfg",
@@ -21,6 +22,7 @@ def test_saved_connections_save_load_and_delete(tmp_path) -> None:
     assert loaded is not None
     assert loaded["host"] == "printer.local"
     assert loaded["username"] == "pi"
+    assert loaded["password"] == "supersecret"
 
     assert service.delete("V2.4") is True
     assert service.list_names() == []

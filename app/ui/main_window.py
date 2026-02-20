@@ -650,7 +650,7 @@ class MainWindow(QMainWindow):
         quote_group = QGroupBox("Mission Quote", content)
         quote_layout = QVBoxLayout(quote_group)
         self.about_quote_label = QLabel(
-            "\"We need easier accasability to control 3D printers and their firmware.\"",
+            "\"We need easier accessibility to control 3D printers and their firmware.\"",
             quote_group,
         )
         self.about_quote_label.setWordWrap(True)
@@ -709,6 +709,17 @@ class MainWindow(QMainWindow):
         details_label.setWordWrap(True)
         details_layout.addWidget(details_label)
         content_layout.addWidget(details_group)
+
+        community_group = QGroupBox("Community", content)
+        community_layout = QVBoxLayout(community_group)
+        discord_label = QLabel(
+            'Join the KlippConfig Discord: <a href="https://discord.gg/cpwExmpC">https://discord.gg/cpwExmpC</a>',
+            community_group,
+        )
+        discord_label.setOpenExternalLinks(True)
+        discord_label.setWordWrap(True)
+        community_layout.addWidget(discord_label)
+        content_layout.addWidget(community_group)
 
         content_layout.addStretch(1)
         scroll.setWidget(content)
@@ -3323,6 +3334,7 @@ class MainWindow(QMainWindow):
             "host": host,
             "port": int(self.ssh_port_spin.value()),
             "username": username,
+            "password": self.ssh_password_edit.text() or None,
             "key_path": self.ssh_key_path_edit.text().strip() or None,
             "remote_dir": self.ssh_remote_dir_edit.text().strip() or "~/printer_data/config",
             "remote_file": self.ssh_remote_fetch_path_edit.text().strip()
@@ -3379,6 +3391,7 @@ class MainWindow(QMainWindow):
             port_value = 22
         self.ssh_port_spin.setValue(port_value)
         self.ssh_username_edit.setText(str(profile.get("username") or ""))
+        self.ssh_password_edit.setText(str(profile.get("password") or ""))
         self.ssh_key_path_edit.setText(str(profile.get("key_path") or ""))
         self.ssh_remote_dir_edit.setText(
             str(profile.get("remote_dir") or "~/printer_data/config")

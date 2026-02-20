@@ -340,6 +340,7 @@ def test_successful_ssh_connection_saves_named_profile(qtbot, tmp_path) -> None:
     window.ssh_connection_name_edit.setText("My Voron")
     window.ssh_host_edit.setText("192.168.1.20")
     window.ssh_username_edit.setText("pi")
+    window.ssh_password_edit.setText("s3cr3t")
     window.ssh_service = FakeConnectionService(ok=True, output="ok")
     window._connect_ssh_to_host()
 
@@ -353,6 +354,7 @@ def test_successful_ssh_connection_saves_named_profile(qtbot, tmp_path) -> None:
     assert loaded is not None
     assert loaded["host"] == "192.168.1.20"
     assert loaded["username"] == "pi"
+    assert loaded["password"] == "s3cr3t"
 
 
 def test_load_saved_profile_populates_ssh_fields(qtbot, tmp_path) -> None:
@@ -363,6 +365,7 @@ def test_load_saved_profile_populates_ssh_fields(qtbot, tmp_path) -> None:
             "host": "printer.local",
             "port": 2222,
             "username": "klipper",
+            "password": "topsecret",
             "key_path": "C:/keys/printer_ed25519",
             "remote_dir": "~/printer_data/config",
             "remote_file": "~/printer_data/config/printer.cfg",
@@ -381,6 +384,7 @@ def test_load_saved_profile_populates_ssh_fields(qtbot, tmp_path) -> None:
     assert window.ssh_host_edit.text() == "printer.local"
     assert window.ssh_port_spin.value() == 2222
     assert window.ssh_username_edit.text() == "klipper"
+    assert window.ssh_password_edit.text() == "topsecret"
     assert window.ssh_key_path_edit.text() == "C:/keys/printer_ed25519"
 
 
@@ -390,7 +394,7 @@ def test_about_tab_contains_quote_and_creator_icon(qtbot) -> None:
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
-    assert "accasability" in window.about_quote_label.text().lower()
+    assert "accessibility" in window.about_quote_label.text().lower()
     pixmap = window.about_creator_icon_label.pixmap()
     has_pixmap = pixmap is not None and not pixmap.isNull()
     has_fallback = bool(window.about_creator_icon_label.text().strip())
