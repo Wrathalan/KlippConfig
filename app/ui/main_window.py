@@ -60,6 +60,7 @@ from app.services.saved_connections import SavedConnectionService
 from app.services.ssh_deploy import SSHDeployError, SSHDeployService
 from app.services.ui_scaling import UIScaleMode, UIScalingService
 from app.services.validator import ValidationService
+from app.version import __version__
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -169,7 +170,7 @@ class MainWindow(QMainWindow):
         saved_connection_service: SavedConnectionService | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("KlippConfig")
+        self.setWindowTitle(f"KlippConfig v{__version__}")
         self.resize(1380, 900)
 
         self.catalog_service = PresetCatalogService()
@@ -646,6 +647,10 @@ class MainWindow(QMainWindow):
         )
         subtitle.setWordWrap(True)
         content_layout.addWidget(subtitle)
+
+        version_label = QLabel(f"Version: {__version__}", content)
+        version_label.setStyleSheet("QLabel { color: #9ca3af; font-size: 12px; }")
+        content_layout.addWidget(version_label)
 
         quote_group = QGroupBox("Mission Quote", content)
         quote_layout = QVBoxLayout(quote_group)

@@ -64,6 +64,31 @@ Alternative launcher:
 pytest
 ```
 
+## Release Versioning
+
+Use the release manager script to keep versioning, changelog updates, and GitHub/Discord announcements in sync.
+
+Show current version:
+
+```powershell
+python .\scripts\release_manager.py show
+```
+
+Bump version and generate release artifacts:
+
+```powershell
+python .\scripts\release_manager.py bump --level patch --summary "Short release summary" --highlight "First highlight" --highlight "Second highlight"
+```
+
+This updates:
+
+- `pyproject.toml`
+- `app/version.py`
+- `scripts/klippconfig-installer.iss`
+- `CHANGELOG.md`
+- `release/announcements/vX.Y.Z-github.md`
+- `release/announcements/vX.Y.Z-discord.md`
+
 ## SSH Tab
 
 1. Open the `SSH` tab.
