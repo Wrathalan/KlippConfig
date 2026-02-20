@@ -71,7 +71,7 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "enum": ["ams_lite", "ercf_v2", "box_turtle", "trad_rack", "filament_buffer"]
+        "pattern": "^[a-z0-9][a-z0-9._-]{2,}$"
       }
     },
     "toolhead": {

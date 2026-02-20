@@ -7,7 +7,12 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from app.domain.models import Preset, ProjectConfig, RenderedPack, ValidationReport
-from app.services.board_registry import get_board_profile, get_toolhead_board_profile
+from app.services.board_registry import (
+    addon_supported_for_preset,
+    get_addon_profile,
+    get_board_profile,
+    get_toolhead_board_profile,
+)
 from app.services.paths import schemas_dir as default_schemas_dir
 from app.services.preset_catalog import PresetCatalogService
 
@@ -44,7 +49,14 @@ class ValidationService:
             )
 
         unsupported_addons = [
-            addon for addon in project.addons if addon not in (preset.supported_addons or [])
+            addon
+            for addon in project.addons
+            if not addon_supported_for_preset(
+                addon,
+                preset_id=preset.id,
+                preset_family=preset.family,
+                preset_supported_addons=preset.supported_addons,
+            )
         ]
         if unsupported_addons:
             report.add(
@@ -57,8 +69,11 @@ class ValidationService:
                 field="addons",
             )
 
-        multi_material_addons = {"ams_lite", "ercf_v2", "box_turtle", "trad_rack"}
-        selected_multi = [addon for addon in project.addons if addon in multi_material_addons]
+        selected_multi: list[str] = []
+        for addon_id in project.addons:
+            addon_profile = get_addon_profile(addon_id)
+            if addon_profile and addon_profile.multi_material:
+                selected_multi.append(addon_id)
         if len(selected_multi) > 1:
             report.add(
                 severity="blocking",
@@ -70,12 +85,17 @@ class ValidationService:
                 field="addons",
             )
 
-        if selected_multi and not project.toolhead.enabled:
+        needs_toolhead = selected_multi
+        for addon_id in project.addons:
+            addon_profile = get_addon_profile(addon_id)
+            if addon_profile and addon_profile.recommends_toolhead and addon_id not in needs_toolhead:
+                needs_toolhead.append(addon_id)
+        if needs_toolhead and not project.toolhead.enabled:
             report.add(
                 severity="warning",
                 code="ADDON_RECOMMENDS_TOOLHEAD",
                 message=(
-                    "Multi-material add-ons usually require a toolhead board and dedicated IO. "
+                    "Selected add-ons usually require a toolhead board and dedicated IO. "
                     "Enable toolhead board if your hardware uses CAN toolheads."
                 ),
                 field="toolhead",

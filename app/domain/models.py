@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 Severity = Literal["blocking", "warning"]
-AddonName = Literal["ams_lite", "ercf_v2", "box_turtle", "trad_rack", "filament_buffer"]
+AddonName = str
 
 
 class BuildVolume(BaseModel):
@@ -41,6 +41,17 @@ class BoardProfile(BaseModel):
     serial_hint: str
     pins: dict[str, str]
     layout: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AddonProfile(BaseModel):
+    id: str
+    label: str
+    template: str
+    description: str = ""
+    multi_material: bool = False
+    recommends_toolhead: bool = False
+    supported_families: list[str] = Field(default_factory=lambda: ["voron"])
+    supported_presets: list[str] = Field(default_factory=list)
 
 
 class Preset(BaseModel):

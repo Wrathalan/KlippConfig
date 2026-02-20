@@ -44,7 +44,15 @@ from PySide6.QtWidgets import (
 )
 
 from app.domain.models import Preset, ProjectConfig, RenderedPack, ValidationReport
-from app.services.board_registry import get_board_profile, get_toolhead_board_profile
+from app.services.board_registry import (
+    addon_supported_for_preset,
+    get_addon_profile,
+    get_board_profile,
+    get_toolhead_board_profile,
+    list_addons,
+    list_main_boards,
+    list_toolhead_boards,
+)
 from app.services.exporter import ExportService
 from app.services.firmware_tools import FirmwareToolsService
 from app.services.paths import creator_icon_path
@@ -144,14 +152,6 @@ class MainWindow(QMainWindow):
         "filament_ops": "Filament Ops",
     }
 
-    ADDON_OPTIONS = {
-        "ams_lite": "AMS Lite",
-        "ercf_v2": "ERCF v2",
-        "box_turtle": "Box Turtle",
-        "trad_rack": "Trad Rack",
-        "filament_buffer": "Filament Buffer",
-    }
-
     DEFAULT_PROBE_TYPES = ["tap", "inductive", "bltouch", "klicky", "euclid"]
     UI_SCALE_OPTIONS: tuple[tuple[UIScaleMode, str], ...] = (
         ("auto", "Auto"),
@@ -188,6 +188,7 @@ class MainWindow(QMainWindow):
         )
         self.ui_scale_actions: dict[UIScaleMode, QAction] = {}
         self.ui_scale_action_group: QActionGroup | None = None
+        self.addon_options = self._build_addon_options()
 
         self.presets_by_id: dict[str, Preset] = {}
         self.current_preset: Preset | None = None
@@ -213,6 +214,15 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_presets()
         self._render_and_validate()
+
+    def _build_addon_options(self) -> dict[str, str]:
+        options: list[tuple[str, str]] = []
+        for addon_id in list_addons():
+            profile = get_addon_profile(addon_id)
+            label = profile.label if profile is not None else addon_id
+            options.append((addon_id, label))
+        options.sort(key=lambda item: item[1].lower())
+        return dict(options)
 
     def _build_ui(self) -> None:
         self._build_menu()
@@ -831,7 +841,7 @@ class MainWindow(QMainWindow):
         self.addons_group = QGroupBox("Add-ons", options_group)
         addons_layout = QVBoxLayout(self.addons_group)
         self.addon_checkboxes: dict[str, QCheckBox] = {}
-        for key, label in self.ADDON_OPTIONS.items():
+        for key, label in self.addon_options.items():
             checkbox = QCheckBox(label, self.addons_group)
             checkbox.setObjectName(f"addon_{key}")
             checkbox.toggled.connect(
@@ -1503,8 +1513,12 @@ class MainWindow(QMainWindow):
         self.current_preset = preset
         self.preset_notes_label.setText(preset.notes or "")
 
-        self._populate_board_combo(preset.supported_boards)
-        self._populate_toolhead_board_combo(preset.supported_toolhead_boards)
+        available_boards = sorted(set(preset.supported_boards).union(list_main_boards()))
+        available_toolheads = sorted(
+            set(preset.supported_toolhead_boards).union(list_toolhead_boards())
+        )
+        self._populate_board_combo(available_boards)
+        self._populate_toolhead_board_combo(available_toolheads)
         self._populate_probe_types(preset)
         self._apply_addon_support(preset)
 
@@ -1564,7 +1578,16 @@ class MainWindow(QMainWindow):
         self.probe_type_combo.blockSignals(False)
 
     def _apply_addon_support(self, preset: Preset) -> None:
-        supported = set(preset.supported_addons)
+        supported = {
+            addon_name
+            for addon_name in self.addon_checkboxes
+            if addon_supported_for_preset(
+                addon_name,
+                preset_id=preset.id,
+                preset_family=preset.family,
+                preset_supported_addons=preset.supported_addons,
+            )
+        }
         for addon_name, checkbox in self.addon_checkboxes.items():
             is_supported = addon_name in supported
             checkbox.setEnabled(is_supported)

@@ -7,8 +7,12 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from app.domain.models import Preset, ProjectConfig, RenderedPack
-from app.services.board_registry import get_board_profile, get_toolhead_board_profile
-from app.services.paths import templates_dir as default_templates_dir
+from app.services.board_registry import (
+    get_addon_profile,
+    get_board_profile,
+    get_toolhead_board_profile,
+)
+from app.services.paths import bundle_template_dirs, templates_dir as default_templates_dir
 
 
 FALLBACK_PINS = {
@@ -41,8 +45,12 @@ FALLBACK_PINS = {
 class ConfigRenderService:
     def __init__(self, template_root: Path | None = None) -> None:
         self.template_root = template_root or default_templates_dir()
+        loader_paths = [str(self.template_root)]
+        for candidate in bundle_template_dirs():
+            if candidate.exists() and candidate.is_dir():
+                loader_paths.append(str(candidate))
         self.env = Environment(
-            loader=FileSystemLoader(self.template_root),
+            loader=FileSystemLoader(loader_paths),
             autoescape=False,
             trim_blocks=True,
             lstrip_blocks=True,
@@ -121,7 +129,10 @@ class ConfigRenderService:
         return self._render_template(template_name, context)
 
     def _render_addon(self, addon_name: str, context: dict[str, Any]) -> str:
-        template_name = f"addons/{addon_name}.cfg.j2"
+        addon_profile = get_addon_profile(addon_name)
+        template_name = (
+            addon_profile.template if addon_profile else f"addons/{addon_name}.cfg.j2"
+        )
         return self._render_template(template_name, context)
 
     def render(self, project: ProjectConfig, preset: Preset) -> RenderedPack:

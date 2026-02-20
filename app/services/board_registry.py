@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.domain.models import BoardProfile
+from app.domain.models import AddonProfile, BoardProfile
+from app.services.config_bundles import BundleCatalogService
 
 
 def _toolhead_profile(label: str, mcu: str) -> BoardProfile:
@@ -391,14 +392,6 @@ BOARD_REGISTRY: dict[str, BoardProfile] = {
 }
 
 
-def get_board_profile(board_id: str) -> BoardProfile | None:
-    return BOARD_REGISTRY.get(board_id)
-
-
-def list_main_boards() -> list[str]:
-    return sorted(BOARD_REGISTRY.keys())
-
-
 TOOLHEAD_BOARD_REGISTRY: dict[str, BoardProfile] = {
     "btt_ebb36_v1_2": _toolhead_profile("BTT EBB36 v1.2", "stm32g0b1xx"),
     "btt_ebb42_v1_2": _toolhead_profile("BTT EBB42 v1.2", "stm32g0b1xx"),
@@ -412,9 +405,127 @@ TOOLHEAD_BOARD_REGISTRY: dict[str, BoardProfile] = {
 }
 
 
+BUILTIN_ADDON_REGISTRY: dict[str, AddonProfile] = {
+    "ams_lite": AddonProfile(
+        id="ams_lite",
+        label="AMS Lite",
+        template="addons/ams_lite.cfg.j2",
+        description="Bambu AMS-style feeder integration scaffold.",
+        multi_material=True,
+        recommends_toolhead=True,
+    ),
+    "ercf_v2": AddonProfile(
+        id="ercf_v2",
+        label="ERCF v2",
+        template="addons/ercf_v2.cfg.j2",
+        description="Enraged Rabbit Carrot Feeder multi-material config scaffold.",
+        multi_material=True,
+        recommends_toolhead=True,
+    ),
+    "box_turtle": AddonProfile(
+        id="box_turtle",
+        label="Box Turtle",
+        template="addons/box_turtle.cfg.j2",
+        description="Box Turtle spool changer integration scaffold.",
+        multi_material=True,
+        recommends_toolhead=True,
+    ),
+    "trad_rack": AddonProfile(
+        id="trad_rack",
+        label="Trad Rack",
+        template="addons/trad_rack.cfg.j2",
+        description="Trad Rack multi-material integration scaffold.",
+        multi_material=True,
+        recommends_toolhead=True,
+    ),
+    "filament_buffer": AddonProfile(
+        id="filament_buffer",
+        label="Filament Buffer",
+        template="addons/filament_buffer.cfg.j2",
+        description="Simple filament buffer/coupler configuration helper.",
+        multi_material=False,
+        recommends_toolhead=False,
+    ),
+}
+
+_bundle_catalog = BundleCatalogService()
+
+
+def _main_board_registry() -> dict[str, BoardProfile]:
+    merged = dict(BOARD_REGISTRY)
+    merged.update(_bundle_catalog.load_main_board_profiles())
+    return merged
+
+
+def _toolhead_board_registry() -> dict[str, BoardProfile]:
+    merged = dict(TOOLHEAD_BOARD_REGISTRY)
+    merged.update(_bundle_catalog.load_toolhead_board_profiles())
+    return merged
+
+
+def _addon_registry() -> dict[str, AddonProfile]:
+    merged = dict(BUILTIN_ADDON_REGISTRY)
+    merged.update(_bundle_catalog.load_addon_profiles())
+    return merged
+
+
+def get_board_profile(board_id: str) -> BoardProfile | None:
+    return _main_board_registry().get(board_id)
+
+
+def list_main_boards() -> list[str]:
+    return sorted(_main_board_registry().keys())
+
+
 def get_toolhead_board_profile(board_id: str) -> BoardProfile | None:
-    return TOOLHEAD_BOARD_REGISTRY.get(board_id)
+    return _toolhead_board_registry().get(board_id)
 
 
 def list_toolhead_boards() -> list[str]:
-    return sorted(TOOLHEAD_BOARD_REGISTRY.keys())
+    return sorted(_toolhead_board_registry().keys())
+
+
+def get_addon_profile(addon_id: str) -> AddonProfile | None:
+    return _addon_registry().get(addon_id)
+
+
+def list_addons() -> list[str]:
+    return sorted(_addon_registry().keys())
+
+
+def addon_supported_for_preset(
+    addon_id: str,
+    *,
+    preset_id: str,
+    preset_family: str,
+    preset_supported_addons: list[str],
+) -> bool:
+    if addon_id in preset_supported_addons:
+        return True
+
+    addon_profile = get_addon_profile(addon_id)
+    if addon_profile is None:
+        return False
+    if addon_profile.supported_presets and preset_id in addon_profile.supported_presets:
+        return True
+    if addon_profile.supported_families and preset_family in addon_profile.supported_families:
+        return True
+    return False
+
+
+def list_addons_for_preset(
+    *,
+    preset_id: str,
+    preset_family: str,
+    preset_supported_addons: list[str],
+) -> list[str]:
+    addon_ids = set(preset_supported_addons)
+    for addon_id in _addon_registry():
+        if addon_supported_for_preset(
+            addon_id,
+            preset_id=preset_id,
+            preset_family=preset_family,
+            preset_supported_addons=preset_supported_addons,
+        ):
+            addon_ids.add(addon_id)
+    return sorted(addon_ids)

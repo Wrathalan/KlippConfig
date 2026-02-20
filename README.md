@@ -13,7 +13,7 @@ It generates full Klipper config packs from curated Voron presets.
 
 ## Features
 
-- Voron-only preset catalog [FOR NOW]
+- Voron-only preset catalog, more to come
 - Main tab launcher with quick workflow entry points (`New Firmware`, `Modify Existing`, `Connect/Manage Printer`, `About`)
 - Guided wizard for board, toolhead, dimensions, and core hardware choices
 - Optional CAN toolhead board selection and `toolhead.cfg` generation
@@ -32,8 +32,6 @@ It generates full Klipper config packs from curated Voron presets.
 - Live SSH deploy to Klipper hosts (test connection, upload, optional restart)
 - Saved SSH connection profiles (named reconnect presets)
 - SSH and Manage Printer console logs are collapsible and collapsed by default
-- Custom app icon is bundled for runtime window + built EXE/shortcut
-- Detailed `About` tab with mission quote and creator icon
 - Network scanner to discover likely Klipper printers on your LAN
 - Dedicated `Modify Existing` remote workflow (connect -> open cfg -> refactor/validate -> upload with backup -> restart test)
 - `Manage Printer` tab for direct remote file editing, backups, and restore operations
