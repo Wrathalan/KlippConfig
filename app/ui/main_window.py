@@ -713,7 +713,7 @@ class MainWindow(QMainWindow):
         community_group = QGroupBox("Community", content)
         community_layout = QVBoxLayout(community_group)
         discord_label = QLabel(
-            'Join the KlippConfig Discord: <a href="https://discord.gg/cpwExmpC">https://discord.gg/cpwExmpC</a>',
+            'Join the KlippConfig Discord: <a href="https://discord.gg/bbnAtfbY5C">https://discord.gg/bbnAtfbY5C</a>',
             community_group,
         )
         discord_label.setOpenExternalLinks(True)

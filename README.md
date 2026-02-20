@@ -13,7 +13,7 @@ It generates full Klipper config packs from curated Voron presets.
 
 ## Features
 
-- Voron-only preset catalog
+- Voron-only preset catalog [FOR NOW]
 - Main tab launcher with quick workflow entry points (`New Firmware`, `Modify Existing`, `Connect/Manage Printer`, `About`)
 - Guided wizard for board, toolhead, dimensions, and core hardware choices
 - Optional CAN toolhead board selection and `toolhead.cfg` generation
@@ -38,7 +38,7 @@ It generates full Klipper config packs from curated Voron presets.
 - Dedicated `Modify Existing` remote workflow (connect -> open cfg -> refactor/validate -> upload with backup -> restart test)
 - `Manage Printer` tab for direct remote file editing, backups, and restore operations
 - Embedded printer control window (web view) from `Manage Printer` for live manual controls
-- Fully offline operation
+- LAN Only
 
 ## Quick Start
 
@@ -54,6 +54,8 @@ Alternative launcher:
 ```powershell
 .\scripts\run_klippconfig.ps1
 ```
+
+`run_klippconfig.ps1` always rebuilds `dist\KlippConfig.exe` first, then launches the EXE.
 
 
 ## Tests
@@ -115,7 +117,7 @@ pytest
 1. Open the `About` tab for mission/context and platform overview.
 2. Includes the quote about easier "accessibility" for controlling 3D printers and firmware.
 3. Shows the creator icon from `assets\creator.ico`.
-4. Includes the Discord community link: https://discord.gg/cpwExmpC
+4. Includes the Discord community link: https://discord.gg/bbnAtfbY5C
 
 ## Windows Build
 

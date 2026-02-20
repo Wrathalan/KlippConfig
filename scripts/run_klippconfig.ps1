@@ -1,12 +1,20 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$venvPythonw = Join-Path $repoRoot ".venv\Scripts\pythonw.exe"
+$buildScript = Join-Path $PSScriptRoot "build_windows.ps1"
+$exePath = Join-Path $repoRoot "dist\KlippConfig.exe"
 
-if (Test-Path $venvPythonw) {
-    $pythonw = $venvPythonw
-} else {
-    $pythonw = "pythonw"
+if (-not (Test-Path $buildScript)) {
+    throw "Build script not found: $buildScript"
 }
 
-Start-Process -FilePath $pythonw -ArgumentList "-m", "app.main" -WorkingDirectory $repoRoot -WindowStyle Hidden
+& $buildScript -CreateDesktopShortcut:$false -BuildInstaller:$false
+if ($LASTEXITCODE -ne 0) {
+    throw "Build failed."
+}
+
+if (-not (Test-Path $exePath)) {
+    throw "Built executable not found: $exePath"
+}
+
+Start-Process -FilePath $exePath -WorkingDirectory $repoRoot -WindowStyle Hidden
