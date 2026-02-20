@@ -25,8 +25,10 @@ Write-Host "[3/5] Building self-contained no-console binary..."
     --onefile `
     --windowed `
     --name KlippConfig `
+    --icon "assets\icon.ico" `
     --add-data "app\presets;app\presets" `
     --add-data "app\templates;app\templates" `
+    --add-data "assets;app\assets" `
     app\main.py
 
 if ($LASTEXITCODE -ne 0) {

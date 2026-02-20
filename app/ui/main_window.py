@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -37,6 +36,8 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -45,6 +46,8 @@ from PySide6.QtWidgets import (
 from app.domain.models import Preset, ProjectConfig, RenderedPack, ValidationReport
 from app.services.board_registry import get_board_profile, get_toolhead_board_profile
 from app.services.exporter import ExportService
+from app.services.firmware_tools import FirmwareToolsService
+from app.services.paths import creator_icon_path
 from app.services.printer_discovery import (
     DiscoveredPrinter,
     PrinterDiscoveryError,
@@ -53,6 +56,7 @@ from app.services.printer_discovery import (
 from app.services.preset_catalog import PresetCatalogError, PresetCatalogService
 from app.services.project_store import ProjectStoreService
 from app.services.renderer import ConfigRenderService
+from app.services.saved_connections import SavedConnectionService
 from app.services.ssh_deploy import SSHDeployError, SSHDeployService
 from app.services.ui_scaling import UIScaleMode, UIScalingService
 from app.services.validator import ValidationService
@@ -162,6 +166,7 @@ class MainWindow(QMainWindow):
         self,
         ui_scaling_service: UIScalingService | None = None,
         active_scale_mode: UIScaleMode | None = None,
+        saved_connection_service: SavedConnectionService | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("KlippConfig")
@@ -170,8 +175,10 @@ class MainWindow(QMainWindow):
         self.catalog_service = PresetCatalogService()
         self.render_service = ConfigRenderService()
         self.validation_service = ValidationService()
+        self.firmware_tools_service = FirmwareToolsService()
         self.export_service = ExportService()
         self.project_store = ProjectStoreService()
+        self.saved_connection_service = saved_connection_service or SavedConnectionService()
         self.ssh_service: SSHDeployService | None = None
         self.discovery_service = PrinterDiscoveryService()
         self.ui_scaling_service = ui_scaling_service or UIScalingService()
@@ -186,11 +193,13 @@ class MainWindow(QMainWindow):
         self.current_project: ProjectConfig | None = None
         self.current_pack: RenderedPack | None = None
         self.current_report = ValidationReport()
+        self.current_cfg_report = ValidationReport()
 
         self._applying_project = False
         self._showing_external_file = False
         self.manage_current_remote_file: str | None = None
         self.manage_current_directory: str | None = None
+        self.modify_current_remote_file: str | None = None
         self.files_current_content: str = ""
         self.files_current_label: str = ""
         self.files_current_source: str = "generated"
@@ -218,18 +227,27 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget(root)
         root_layout.addWidget(self.tabs)
 
+        self.main_tab = self._build_main_tab()
         self.wizard_tab = self._build_wizard_tab()
         self.files_tab = self._build_files_tab()
         self.live_deploy_tab = self._build_live_deploy_tab()
+        self.modify_existing_tab = self._build_modify_existing_tab()
         self.manage_printer_tab = self._build_manage_printer_tab()
+        self.about_tab = self._build_about_tab()
 
+        self.tabs.addTab(self.main_tab, "Main")
         self.tabs.addTab(self.wizard_tab, "Configuration")
         self.tabs.addTab(self.files_tab, "Files")
         self.tabs.addTab(self.live_deploy_tab, "SSH")
+        self.tabs.addTab(self.modify_existing_tab, "Modify Existing")
         self.tabs.addTab(self.manage_printer_tab, "Manage Printer")
+        self.tabs.addTab(self.about_tab, "About")
 
         self.setCentralWidget(root)
         self._build_footer_connection_health()
+        self._set_manage_connected_printer_display(None, None, connected=False)
+        self._set_modify_connected_printer_display(None, None, connected=False)
+        self._refresh_modify_connection_summary()
         self.statusBar().showMessage("Ready")
 
     def _build_footer_connection_health(self) -> None:
@@ -258,6 +276,74 @@ class MainWindow(QMainWindow):
         if detail:
             tooltip = f"{tooltip}\n{detail}"
         self.device_health_icon.setToolTip(tooltip)
+
+    def _set_connected_printer_display_label(
+        self,
+        label_widget: QLabel,
+        printer_name: str | None,
+        host: str | None,
+        *,
+        connected: bool,
+    ) -> None:
+        if connected and printer_name:
+            label = printer_name
+            clean_host = (host or "").strip()
+            if clean_host and clean_host.casefold() != printer_name.casefold():
+                label = f"{printer_name} ({clean_host})"
+            label_widget.setText(label)
+            label_widget.setStyleSheet(
+                "QLabel {"
+                " background-color: #14532d;"
+                " color: #ffffff;"
+                " border: 1px solid #16a34a;"
+                " border-radius: 4px;"
+                " padding: 4px 6px;"
+                " font-weight: 600;"
+                "}"
+            )
+            return
+        label_widget.setText("No active SSH connection.")
+        label_widget.setStyleSheet(
+            "QLabel {"
+            " background-color: #111827;"
+            " color: #e5e7eb;"
+            " border: 1px solid #374151;"
+            " border-radius: 4px;"
+            " padding: 4px 6px;"
+            "}"
+        )
+
+    def _set_manage_connected_printer_display(
+        self,
+        printer_name: str | None,
+        host: str | None,
+        *,
+        connected: bool,
+    ) -> None:
+        if not hasattr(self, "manage_connected_printer_label"):
+            return
+        self._set_connected_printer_display_label(
+            self.manage_connected_printer_label,
+            printer_name,
+            host,
+            connected=connected,
+        )
+
+    def _set_modify_connected_printer_display(
+        self,
+        printer_name: str | None,
+        host: str | None,
+        *,
+        connected: bool,
+    ) -> None:
+        if not hasattr(self, "modify_connected_printer_label"):
+            return
+        self._set_connected_printer_display_label(
+            self.modify_connected_printer_label,
+            printer_name,
+            host,
+            connected=connected,
+        )
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -334,6 +420,299 @@ class MainWindow(QMainWindow):
 
         label = "Auto" if selected_mode == "auto" else f"{selected_mode}%"
         self.statusBar().showMessage(f"UI scale set to {label}", 2500)
+
+    def _go_to_configuration_tab(self) -> None:
+        self.tabs.setCurrentWidget(self.wizard_tab)
+
+    def _go_to_modify_existing_tab(self) -> None:
+        self.tabs.setCurrentWidget(self.modify_existing_tab)
+
+    def _go_to_ssh_tab(self) -> None:
+        self.tabs.setCurrentWidget(self.live_deploy_tab)
+
+    def _go_to_about_tab(self) -> None:
+        self.tabs.setCurrentWidget(self.about_tab)
+
+    def _build_main_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+
+        title = QLabel("KlippConfig Main", tab)
+        title.setStyleSheet("QLabel { font-size: 22px; font-weight: 700; }")
+        layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Choose your workflow entry point. Existing SSH, Manage Printer, and Files tools remain available.",
+            tab,
+        )
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        actions_group = QGroupBox("Start", tab)
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setSpacing(10)
+
+        self.main_new_firmware_btn = QPushButton("New Firmware", actions_group)
+        self.main_new_firmware_btn.clicked.connect(self._go_to_configuration_tab)
+        actions_layout.addWidget(self.main_new_firmware_btn)
+        actions_layout.addWidget(
+            QLabel(
+                "Open Configuration to build a new printer profile from presets.",
+                actions_group,
+            )
+        )
+
+        self.main_modify_existing_btn = QPushButton("Modify Existing", actions_group)
+        self.main_modify_existing_btn.clicked.connect(self._go_to_modify_existing_tab)
+        actions_layout.addWidget(self.main_modify_existing_btn)
+        actions_layout.addWidget(
+            QLabel(
+                "Open the remote workflow for live SSH config editing, upload, and restart testing.",
+                actions_group,
+            )
+        )
+
+        self.main_connect_manage_btn = QPushButton("Connect/Manage Printer", actions_group)
+        self.main_connect_manage_btn.clicked.connect(self._go_to_ssh_tab)
+        actions_layout.addWidget(self.main_connect_manage_btn)
+        actions_layout.addWidget(
+            QLabel(
+                "Go to SSH for connect/discovery/deploy and then use Manage Printer for direct file operations.",
+                actions_group,
+            )
+        )
+
+        self.main_about_btn = QPushButton("About", actions_group)
+        self.main_about_btn.clicked.connect(self._go_to_about_tab)
+        actions_layout.addWidget(self.main_about_btn)
+        actions_layout.addWidget(QLabel("View mission, creator info, and platform details.", actions_group))
+
+        layout.addWidget(actions_group)
+        layout.addStretch(1)
+        return tab
+
+    def _refresh_modify_connection_summary(self) -> None:
+        if not hasattr(self, "modify_connection_summary_label"):
+            return
+
+        host = self.ssh_host_edit.text().strip() if hasattr(self, "ssh_host_edit") else ""
+        username = self.ssh_username_edit.text().strip() if hasattr(self, "ssh_username_edit") else ""
+        port = self.ssh_port_spin.value() if hasattr(self, "ssh_port_spin") else 22
+        key_path = self.ssh_key_path_edit.text().strip() if hasattr(self, "ssh_key_path_edit") else ""
+        auth_mode = "SSH key" if key_path else "password/agent"
+
+        if host and username:
+            summary = f"{username}@{host}:{port} ({auth_mode})"
+        elif host:
+            summary = f"{host}:{port} (set username on SSH tab)"
+        else:
+            summary = "Set host and username on SSH tab."
+        self.modify_connection_summary_label.setText(summary)
+
+        if hasattr(self, "modify_restart_command_label"):
+            restart_command = ""
+            if hasattr(self, "ssh_restart_cmd_edit"):
+                restart_command = self.ssh_restart_cmd_edit.text().strip()
+            self.modify_restart_command_label.setText(
+                restart_command or "sudo systemctl restart klipper"
+            )
+
+    def _sync_modify_remote_cfg_from_ssh(self, value: str) -> None:
+        if not hasattr(self, "modify_remote_cfg_path_edit"):
+            return
+        if self.modify_current_remote_file:
+            return
+        if not self.modify_remote_cfg_path_edit.text().strip():
+            self.modify_remote_cfg_path_edit.setText(value.strip())
+
+    def _build_modify_existing_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+
+        intro = QLabel(
+            "Remote-only workflow: connect over SSH, open a .cfg file, modify/refactor/validate, "
+            "upload with backup, then run restart/status test.",
+            tab,
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        target_group = QGroupBox("SSH Target", tab)
+        target_form = QFormLayout(target_group)
+
+        self.modify_connected_printer_label = QLabel("No active SSH connection.", target_group)
+        self.modify_connected_printer_label.setWordWrap(True)
+        target_form.addRow("Connected", self.modify_connected_printer_label)
+
+        self.modify_connection_summary_label = QLabel("", target_group)
+        self.modify_connection_summary_label.setWordWrap(True)
+        target_form.addRow("Using SSH", self.modify_connection_summary_label)
+
+        self.modify_remote_cfg_path_edit = QLineEdit(target_group)
+        self.modify_remote_cfg_path_edit.setText(
+            self.ssh_remote_fetch_path_edit.text().strip() or "~/printer_data/config/printer.cfg"
+        )
+        target_form.addRow("Remote .cfg path", self.modify_remote_cfg_path_edit)
+
+        self.modify_backup_root_edit = QLineEdit(target_group)
+        self.modify_backup_root_edit.setText("~/klippconfig_backups")
+        target_form.addRow("Backup root", self.modify_backup_root_edit)
+
+        self.modify_restart_command_label = QLabel("", target_group)
+        self.modify_restart_command_label.setWordWrap(True)
+        target_form.addRow("Restart command", self.modify_restart_command_label)
+
+        layout.addWidget(target_group)
+
+        action_row = QHBoxLayout()
+
+        self.modify_connect_btn = QPushButton("Connect", tab)
+        self.modify_connect_btn.clicked.connect(self._modify_connect)
+        action_row.addWidget(self.modify_connect_btn)
+
+        self.modify_open_remote_btn = QPushButton("Open Remote .cfg", tab)
+        self.modify_open_remote_btn.clicked.connect(self._modify_open_remote_cfg)
+        action_row.addWidget(self.modify_open_remote_btn)
+
+        self.modify_refactor_btn = QPushButton("Refactor", tab)
+        self.modify_refactor_btn.clicked.connect(self._modify_refactor_current_file)
+        action_row.addWidget(self.modify_refactor_btn)
+
+        self.modify_validate_btn = QPushButton("Validate", tab)
+        self.modify_validate_btn.clicked.connect(self._modify_validate_current_file)
+        action_row.addWidget(self.modify_validate_btn)
+
+        self.modify_upload_btn = QPushButton("Upload", tab)
+        self.modify_upload_btn.clicked.connect(self._modify_upload_current_file)
+        action_row.addWidget(self.modify_upload_btn)
+
+        self.modify_test_restart_btn = QPushButton("Test Restart", tab)
+        self.modify_test_restart_btn.clicked.connect(self._modify_test_restart)
+        action_row.addWidget(self.modify_test_restart_btn)
+
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self.modify_status_label = QLabel("No remote file loaded.", tab)
+        self.modify_status_label.setWordWrap(True)
+        layout.addWidget(self.modify_status_label)
+
+        self.modify_editor = QPlainTextEdit(tab)
+        layout.addWidget(self.modify_editor, 1)
+
+        (
+            modify_log_section,
+            self.modify_log_section_toggle,
+            self.modify_log_section_content,
+            modify_log_layout,
+        ) = self._build_collapsible_section("Console Log", tab, expanded=False)
+
+        self.modify_log = QPlainTextEdit(self.modify_log_section_content)
+        self.modify_log.setReadOnly(True)
+        self.modify_log.setMaximumBlockCount(2000)
+        modify_log_layout.addWidget(self.modify_log, 1)
+        layout.addWidget(modify_log_section, 1)
+
+        self.ssh_host_edit.textChanged.connect(self._refresh_modify_connection_summary)
+        self.ssh_username_edit.textChanged.connect(self._refresh_modify_connection_summary)
+        self.ssh_port_spin.valueChanged.connect(self._refresh_modify_connection_summary)
+        self.ssh_key_path_edit.textChanged.connect(self._refresh_modify_connection_summary)
+        self.ssh_restart_cmd_edit.textChanged.connect(self._refresh_modify_connection_summary)
+        self.ssh_remote_fetch_path_edit.textChanged.connect(self._sync_modify_remote_cfg_from_ssh)
+
+        self._refresh_modify_connection_summary()
+        return tab
+
+    def _build_about_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+
+        scroll = QScrollArea(tab)
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll, 1)
+
+        content = QWidget(scroll)
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(12)
+
+        title = QLabel("About KlippConfig", content)
+        title.setStyleSheet("QLabel { font-size: 22px; font-weight: 700; }")
+        content_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "KlippConfig is a desktop toolkit for configuring, validating, and managing Klipper firmware setups.",
+            content,
+        )
+        subtitle.setWordWrap(True)
+        content_layout.addWidget(subtitle)
+
+        quote_group = QGroupBox("Mission Quote", content)
+        quote_layout = QVBoxLayout(quote_group)
+        self.about_quote_label = QLabel(
+            "\"We need easier accasability to control 3D printers and their firmware.\"",
+            quote_group,
+        )
+        self.about_quote_label.setWordWrap(True)
+        self.about_quote_label.setStyleSheet(
+            "QLabel { font-style: italic; font-size: 15px; color: #f3f4f6; "
+            "background-color: #1f2937; border: 1px solid #4b5563; border-radius: 6px; padding: 10px; }"
+        )
+        quote_layout.addWidget(self.about_quote_label)
+        content_layout.addWidget(quote_group)
+
+        creator_group = QGroupBox("Creator", content)
+        creator_layout = QHBoxLayout(creator_group)
+
+        self.about_creator_icon_label = QLabel(creator_group)
+        self.about_creator_icon_label.setFixedSize(120, 120)
+        self.about_creator_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        creator_icon = creator_icon_path()
+        if creator_icon.exists():
+            pixmap = QPixmap(str(creator_icon))
+            if not pixmap.isNull():
+                self.about_creator_icon_label.setPixmap(
+                    pixmap.scaled(
+                        110,
+                        110,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+            else:
+                self.about_creator_icon_label.setText("Creator icon\nunavailable")
+        else:
+            self.about_creator_icon_label.setText("Creator icon\nmissing")
+        creator_layout.addWidget(self.about_creator_icon_label)
+
+        creator_text = QLabel(
+            "Built to reduce friction across printer setup and ongoing firmware maintenance.\n\n"
+            "The goal is to give makers one place to configure hardware profiles, validate risky changes, "
+            "and manage live printer files without hopping between disconnected tools.",
+            creator_group,
+        )
+        creator_text.setWordWrap(True)
+        creator_layout.addWidget(creator_text, 1)
+        content_layout.addWidget(creator_group)
+
+        details_group = QGroupBox("Platform Overview", content)
+        details_layout = QVBoxLayout(details_group)
+        details_label = QLabel(
+            "Core capabilities:\n"
+            "- Preset-driven Voron config generation.\n"
+            "- Live validation for conflicts and config issues.\n"
+            "- SSH connect/deploy workflows with saved connection profiles.\n"
+            "- Manage Printer tools for remote file editing, backups, restore, and control window access.\n"
+            "- Local and remote .cfg refactor + validation flows.",
+            details_group,
+        )
+        details_label.setWordWrap(True)
+        details_layout.addWidget(details_label)
+        content_layout.addWidget(details_group)
+
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        return tab
 
     def _build_wizard_tab(self) -> QWidget:
         tab = QWidget(self)
@@ -525,10 +904,23 @@ class MainWindow(QMainWindow):
         self.apply_form_btn.clicked.connect(self._apply_cfg_form_changes)
         top_row.addWidget(self.apply_form_btn)
 
+        self.refactor_cfg_btn = QPushButton("Refactor Current .cfg", tab)
+        self.refactor_cfg_btn.clicked.connect(self._refactor_current_cfg_file)
+        top_row.addWidget(self.refactor_cfg_btn)
+
+        self.validate_cfg_btn = QPushButton("Validate Current .cfg", tab)
+        self.validate_cfg_btn.clicked.connect(self._validate_current_cfg_file)
+        top_row.addWidget(self.validate_cfg_btn)
+
         self.preview_path_label = QLabel("No file selected.", tab)
         top_row.addWidget(self.preview_path_label, 1)
 
         layout.addLayout(top_row)
+
+        self.cfg_tools_status_label = QLabel("", tab)
+        self.cfg_tools_status_label.setWordWrap(True)
+        self.cfg_tools_status_label.setVisible(False)
+        layout.addWidget(self.cfg_tools_status_label)
 
         self.files_validation_notice_label = QLabel("", tab)
         self.files_validation_notice_label.setWordWrap(True)
@@ -758,6 +1150,37 @@ class MainWindow(QMainWindow):
         key_layout.addWidget(browse_key_btn)
         connection_form.addRow("SSH key", key_row)
 
+        saved_row = QWidget(connection_group)
+        saved_layout = QHBoxLayout(saved_row)
+        saved_layout.setContentsMargins(0, 0, 0, 0)
+        self.ssh_saved_connection_combo = QComboBox(saved_row)
+        self.ssh_saved_connection_combo.setMinimumWidth(220)
+        saved_layout.addWidget(self.ssh_saved_connection_combo, 1)
+
+        load_saved_btn = QPushButton("Load", saved_row)
+        load_saved_btn.clicked.connect(self._load_selected_saved_connection)
+        saved_layout.addWidget(load_saved_btn)
+
+        save_saved_btn = QPushButton("Save", saved_row)
+        save_saved_btn.clicked.connect(self._save_current_connection_profile)
+        saved_layout.addWidget(save_saved_btn)
+
+        delete_saved_btn = QPushButton("Delete", saved_row)
+        delete_saved_btn.clicked.connect(self._delete_selected_saved_connection)
+        saved_layout.addWidget(delete_saved_btn)
+        connection_form.addRow("Saved", saved_row)
+
+        self.ssh_connection_name_edit = QLineEdit(connection_group)
+        self.ssh_connection_name_edit.setPlaceholderText("My Printer")
+        connection_form.addRow("Connection name", self.ssh_connection_name_edit)
+
+        self.ssh_save_on_success_checkbox = QCheckBox(
+            "Save on successful connect (uses Connection name)",
+            connection_group,
+        )
+        self.ssh_save_on_success_checkbox.setChecked(True)
+        connection_form.addRow(self.ssh_save_on_success_checkbox)
+
         self.ssh_remote_dir_edit = QLineEdit(connection_group)
         self.ssh_remote_dir_edit.setText("~/printer_data/config")
         connection_form.addRow("Remote cfg dir", self.ssh_remote_dir_edit)
@@ -845,9 +1268,9 @@ class MainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
 
-        test_btn = QPushButton("Test Connection", tab)
-        test_btn.clicked.connect(self._test_ssh_connection)
-        button_row.addWidget(test_btn)
+        self.ssh_connect_btn = QPushButton("Connect", tab)
+        self.ssh_connect_btn.clicked.connect(self._connect_ssh_to_host)
+        button_row.addWidget(self.ssh_connect_btn)
 
         fetch_btn = QPushButton("Open Remote File", tab)
         fetch_btn.clicked.connect(self._fetch_remote_cfg_file)
@@ -860,9 +1283,19 @@ class MainWindow(QMainWindow):
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
-        self.ssh_log = QPlainTextEdit(tab)
+        (
+            ssh_log_section,
+            self.ssh_log_section_toggle,
+            self.ssh_log_section_content,
+            ssh_log_layout,
+        ) = self._build_collapsible_section("Console Log", tab, expanded=False)
+
+        self.ssh_log = QPlainTextEdit(self.ssh_log_section_content)
         self.ssh_log.setReadOnly(True)
-        layout.addWidget(self.ssh_log, 1)
+        self.ssh_log.setMaximumBlockCount(2000)
+        ssh_log_layout.addWidget(self.ssh_log, 1)
+        layout.addWidget(ssh_log_section, 1)
+        self._refresh_saved_connection_profiles()
         return tab
 
     def _build_manage_printer_tab(self) -> QWidget:
@@ -878,6 +1311,10 @@ class MainWindow(QMainWindow):
 
         target_group = QGroupBox("Target Printer", tab)
         target_form = QFormLayout(target_group)
+
+        self.manage_connected_printer_label = QLabel("No active SSH connection.", target_group)
+        self.manage_connected_printer_label.setWordWrap(True)
+        target_form.addRow("Connected", self.manage_connected_printer_label)
 
         host_row = QWidget(target_group)
         host_row_layout = QHBoxLayout(host_row)
@@ -929,6 +1366,14 @@ class MainWindow(QMainWindow):
         self.manage_save_file_btn.clicked.connect(self._manage_save_current_file)
         action_row.addWidget(self.manage_save_file_btn)
 
+        self.manage_refactor_file_btn = QPushButton("Refactor Current .cfg", tab)
+        self.manage_refactor_file_btn.clicked.connect(self._manage_refactor_current_file)
+        action_row.addWidget(self.manage_refactor_file_btn)
+
+        self.manage_validate_file_btn = QPushButton("Validate Current .cfg", tab)
+        self.manage_validate_file_btn.clicked.connect(self._manage_validate_current_file)
+        action_row.addWidget(self.manage_validate_file_btn)
+
         self.manage_open_control_btn = QPushButton("Open Control Window", tab)
         self.manage_open_control_btn.clicked.connect(self._manage_open_control_window)
         action_row.addWidget(self.manage_open_control_btn)
@@ -937,13 +1382,18 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_row)
 
         editor_splitter = QSplitter(Qt.Horizontal, tab)
-        self.manage_file_list = QListWidget(editor_splitter)
-        self.manage_file_list.itemSelectionChanged.connect(self._manage_file_selection_changed)
-        self.manage_file_list.itemDoubleClicked.connect(lambda _item: self._manage_open_selected_file())
+        self.manage_file_tree = QTreeWidget(editor_splitter)
+        self.manage_file_tree.setHeaderLabels(["Remote Files"])
+        self.manage_file_tree.setAlternatingRowColors(True)
+        self.manage_file_tree.itemSelectionChanged.connect(self._manage_file_selection_changed)
+        self.manage_file_tree.itemDoubleClicked.connect(
+            lambda _item, _column: self._manage_open_selected_file()
+        )
+        self.manage_file_tree.itemExpanded.connect(self._manage_tree_item_expanded)
 
         editor_panel = QWidget(editor_splitter)
         editor_layout = QVBoxLayout(editor_panel)
-        self.manage_current_dir_label = QLabel("Browsing: (not loaded)", editor_panel)
+        self.manage_current_dir_label = QLabel("Tree root: (not loaded)", editor_panel)
         editor_layout.addWidget(self.manage_current_dir_label)
         self.manage_current_file_label = QLabel("No file loaded.", editor_panel)
         editor_layout.addWidget(self.manage_current_file_label)
@@ -990,10 +1440,18 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(backup_group)
 
-        self.manage_log = QPlainTextEdit(tab)
+        (
+            manage_log_section,
+            self.manage_log_section_toggle,
+            self.manage_log_section_content,
+            manage_log_layout,
+        ) = self._build_collapsible_section("Console Log", tab, expanded=False)
+
+        self.manage_log = QPlainTextEdit(self.manage_log_section_content)
         self.manage_log.setReadOnly(True)
         self.manage_log.setMaximumBlockCount(1000)
-        layout.addWidget(self.manage_log, 1)
+        manage_log_layout.addWidget(self.manage_log, 1)
+        layout.addWidget(manage_log_section, 1)
 
         self.ssh_remote_dir_edit.textChanged.connect(self._sync_manage_remote_dir_from_ssh)
         return tab
@@ -1541,6 +1999,167 @@ class MainWindow(QMainWindow):
         self.file_preview.setPlainText(content)
         self.preview_path_label.setText(label)
         self._rebuild_cfg_form()
+        if self._is_cfg_label(label, generated_name):
+            self._run_current_cfg_validation(show_dialog=False)
+        else:
+            self._clear_cfg_tools_status()
+
+    def _current_cfg_target_label(self) -> str:
+        if self.files_current_generated_name:
+            return self.files_current_generated_name
+        label = self.files_current_label.strip()
+        if not label:
+            return "current.cfg"
+        return Path(label).name or label
+
+    def _current_cfg_context(self, show_error: bool = True) -> tuple[str, str] | None:
+        if not self.files_current_content.strip():
+            if show_error:
+                self._show_error("Files", "No file is loaded.")
+            return None
+        if not self._is_cfg_label(self.files_current_label, self.files_current_generated_name):
+            if show_error:
+                self._show_error("Files", "Current file is not a .cfg file.")
+            return None
+        return self.files_current_content, self._current_cfg_target_label()
+
+    def _clear_cfg_tools_status(self) -> None:
+        self.current_cfg_report = ValidationReport()
+        self.cfg_tools_status_label.clear()
+        self.cfg_tools_status_label.setStyleSheet("")
+        self.cfg_tools_status_label.setVisible(False)
+
+    def _update_cfg_tools_status(self, report: ValidationReport, source_label: str) -> None:
+        blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
+        warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        total = blocking + warnings
+
+        if total == 0:
+            message = f"{source_label}: no firmware validation issues."
+            style = (
+                "QLabel {"
+                " background-color: #14532d;"
+                " color: #ffffff;"
+                " border: 1px solid #16a34a;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+        elif blocking > 0:
+            message = (
+                f"{source_label}: {blocking} blocking and {warnings} warning issue(s) found."
+            )
+            style = (
+                "QLabel {"
+                " background-color: #7f1d1d;"
+                " color: #ffffff;"
+                " border: 1px solid #ef4444;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+        else:
+            message = f"{source_label}: warnings only ({warnings})."
+            style = (
+                "QLabel {"
+                " background-color: #78350f;"
+                " color: #ffffff;"
+                " border: 1px solid #f59e0b;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+
+        self.cfg_tools_status_label.setText(message)
+        self.cfg_tools_status_label.setStyleSheet(style)
+        self.cfg_tools_status_label.setVisible(True)
+
+    @staticmethod
+    def _build_cfg_validation_details(report: ValidationReport, limit: int = 8) -> str:
+        if not report.findings:
+            return "No issues detected."
+        lines: list[str] = []
+        for finding in report.findings[:limit]:
+            field_suffix = f" ({finding.field})" if finding.field else ""
+            lines.append(
+                f"[{finding.severity}] {finding.code}{field_suffix}: {finding.message}"
+            )
+        hidden = len(report.findings) - len(lines)
+        if hidden > 0:
+            lines.append(f"... {hidden} additional finding(s) omitted.")
+        return "\n".join(lines)
+
+    def _run_current_cfg_validation(self, show_dialog: bool) -> ValidationReport | None:
+        context = self._current_cfg_context(show_error=show_dialog)
+        if context is None:
+            return None
+        content, source_label = context
+
+        report = self.firmware_tools_service.validate_cfg(content, source_label=source_label)
+        self.current_cfg_report = report
+        self._update_cfg_tools_status(report, source_label=source_label)
+
+        blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
+        warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        if blocking > 0:
+            self.statusBar().showMessage(f"Firmware validation: {blocking} blocking issue(s)", 3500)
+        elif warnings > 0:
+            self.statusBar().showMessage(f"Firmware validation: {warnings} warning issue(s)", 3500)
+        else:
+            self.statusBar().showMessage("Firmware validation passed", 2500)
+
+        if show_dialog:
+            details = self._build_cfg_validation_details(report)
+            if blocking > 0:
+                QMessageBox.critical(
+                    self,
+                    "Firmware Validation",
+                    f"{source_label}: {blocking} blocking, {warnings} warning.\n\n{details}",
+                )
+            elif warnings > 0:
+                QMessageBox.warning(
+                    self,
+                    "Firmware Validation",
+                    f"{source_label}: warnings detected ({warnings}).\n\n{details}",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Firmware Validation",
+                    f"{source_label}: no issues detected.",
+                )
+        return report
+
+    def _validate_current_cfg_file(self, _checked: bool = False) -> None:
+        self._run_current_cfg_validation(show_dialog=True)
+
+    def _refactor_current_cfg_file(self, _checked: bool = False) -> None:
+        context = self._current_cfg_context(show_error=True)
+        if context is None:
+            return
+        content, source_label = context
+
+        updated, changes = self.firmware_tools_service.refactor_cfg(content)
+        if updated != content:
+            self._set_files_tab_content(
+                content=updated,
+                label=self.files_current_label,
+                source=self.files_current_source,
+                generated_name=self.files_current_generated_name,
+            )
+            if (
+                self.files_current_source == "generated"
+                and self.current_pack is not None
+                and self.files_current_generated_name
+            ):
+                self.current_pack.files[self.files_current_generated_name] = updated
+            self.statusBar().showMessage(f"Refactored {source_label} ({changes} change(s))", 3000)
+        else:
+            self.statusBar().showMessage(f"No refactor changes for {source_label}", 2500)
+        self._run_current_cfg_validation(show_dialog=False)
 
     @staticmethod
     def _is_cfg_label(label: str, generated_name: str | None) -> bool:
@@ -1696,6 +2315,7 @@ class MainWindow(QMainWindow):
             self.current_pack.files[self.files_current_generated_name] = updated
 
         self.statusBar().showMessage("Applied form changes to current file view", 2500)
+        self._run_current_cfg_validation(show_dialog=False)
 
     def _ensure_export_ready(self) -> bool:
         if self.current_pack is None:
@@ -2014,8 +2634,12 @@ class MainWindow(QMainWindow):
             return
         self.ssh_host_edit.setText(str(host))
         self.manage_host_edit.setText(str(host))
+        self._refresh_modify_connection_summary()
+        if not self.ssh_connection_name_edit.text().strip():
+            self.ssh_connection_name_edit.setText(str(host))
         self._append_ssh_log(f"Using discovered host: {host}")
         self._append_manage_log(f"Using discovered host: {host}")
+        self._append_modify_log(f"Using discovered host: {host}")
         self.statusBar().showMessage(f"Host set to {host}", 2500)
 
     def _sync_manage_remote_dir_from_ssh(self, value: str) -> None:
@@ -2116,8 +2740,144 @@ class MainWindow(QMainWindow):
         parent = posixpath.dirname(normalized) or "/"
         return parent
 
+    @staticmethod
+    def _manage_tree_path_role() -> int:
+        return int(Qt.ItemDataRole.UserRole)
+
+    @staticmethod
+    def _manage_tree_type_role() -> int:
+        return int(Qt.ItemDataRole.UserRole + 1)
+
+    @staticmethod
+    def _manage_tree_loaded_role() -> int:
+        return int(Qt.ItemDataRole.UserRole + 2)
+
+    def _manage_selected_tree_item(self) -> QTreeWidgetItem | None:
+        selected = self.manage_file_tree.selectedItems()
+        if not selected:
+            return None
+        return selected[0]
+
+    @staticmethod
+    def _manage_entry_sort_key(entry: dict[str, Any]) -> tuple[int, str]:
+        entry_type = str(entry.get("type") or "file")
+        name = str(entry.get("name") or "")
+        return (0 if entry_type == "dir" else 1, name.casefold())
+
+    def _manage_create_tree_item(
+        self,
+        *,
+        name: str,
+        remote_path: str,
+        entry_type: str,
+        loaded: bool,
+    ) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([name])
+        item.setData(0, self._manage_tree_path_role(), remote_path)
+        item.setData(0, self._manage_tree_type_role(), entry_type)
+        item.setData(0, self._manage_tree_loaded_role(), loaded)
+        if entry_type == "dir":
+            item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+        return item
+
+    def _manage_populate_tree_children(
+        self,
+        parent_item: QTreeWidgetItem,
+        entries: list[dict[str, Any]],
+    ) -> int:
+        count = 0
+        for entry in sorted(entries, key=self._manage_entry_sort_key):
+            entry_type = str(entry.get("type") or "file")
+            name = str(entry.get("name") or "").strip()
+            remote_path = str(entry.get("path") or "").strip()
+            if not name or not remote_path:
+                continue
+            item = self._manage_create_tree_item(
+                name=name,
+                remote_path=remote_path,
+                entry_type=entry_type,
+                loaded=(entry_type != "dir"),
+            )
+            parent_item.addChild(item)
+            count += 1
+        return count
+
+    def _manage_load_tree_item(
+        self,
+        item: QTreeWidgetItem,
+        service: SSHDeployService | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> bool:
+        entry_type = str(item.data(0, self._manage_tree_type_role()) or "file")
+        remote_path = str(item.data(0, self._manage_tree_path_role()) or "").strip()
+        if entry_type != "dir" or not remote_path:
+            return False
+        if bool(item.data(0, self._manage_tree_loaded_role())):
+            return True
+
+        local_service = service or self._get_ssh_service()
+        if local_service is None:
+            return False
+        local_params = params or self._collect_manage_params()
+        if local_params is None:
+            return False
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            listing = local_service.list_directory(remote_dir=remote_path, **local_params)
+        except SSHDeployError as exc:
+            self._set_device_connection_health(False, str(exc))
+            self._show_error("Manage Printer", str(exc))
+            self._append_manage_log(f"Folder load failed: {exc}")
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        entries = list(listing.get("entries") or [])
+        item.takeChildren()
+        shown_count = self._manage_populate_tree_children(item, entries)
+        item.setData(0, self._manage_tree_loaded_role(), True)
+        item.setExpanded(True)
+        self.manage_current_directory = remote_path
+        self.manage_remote_dir_edit.setText(remote_path)
+        self.manage_current_dir_label.setText(f"Tree root: {self.manage_remote_dir_edit.text().strip()}")
+        self._append_manage_log(f"Loaded {shown_count} entries from {remote_path}.")
+        self._set_device_connection_health(True, f"Host {local_params['host']} reachable.")
+        return True
+
+    def _manage_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        entry_type = str(item.data(0, self._manage_tree_type_role()) or "file")
+        if entry_type != "dir":
+            return
+        if bool(item.data(0, self._manage_tree_loaded_role())):
+            return
+        self._manage_load_tree_item(item)
+
+    def _manage_tree_root_display_name(self, remote_dir: str) -> str:
+        normalized = remote_dir.rstrip("/") or "/"
+        if normalized == "/":
+            return "/"
+        name = posixpath.basename(normalized)
+        if name:
+            return name
+        return normalized
+
     def _manage_browse_up_directory(self) -> None:
-        current = self.manage_current_directory or self._manage_resolve_root_directory()
+        selected = self._manage_selected_tree_item()
+        current = ""
+        if selected is not None:
+            selected_path = str(
+                selected.data(0, self._manage_tree_path_role()) or ""
+            ).strip()
+            selected_type = str(
+                selected.data(0, self._manage_tree_type_role()) or "file"
+            )
+            if selected_type == "dir":
+                current = selected_path
+            else:
+                current = self._manage_parent_directory(selected_path)
+        if not current:
+            current = self.manage_current_directory or self._manage_resolve_root_directory()
         if not current:
             self._show_error("Manage Printer", "Remote cfg dir is empty.")
             return
@@ -2155,41 +2915,42 @@ class MainWindow(QMainWindow):
             self.manage_refresh_files_btn.setEnabled(True)
             self.manage_up_dir_btn.setEnabled(True)
 
-        self.manage_file_list.clear()
         current_dir = str(listing.get("directory") or remote_dir).strip()
         entries = list(listing.get("entries") or [])
-        for entry in entries:
-            entry_type = str(entry.get("type") or "file")
-            name = str(entry.get("name") or "")
-            remote_path = str(entry.get("path") or "")
-            if not name or not remote_path:
-                continue
-            display = f"{name}/" if entry_type == "dir" else name
-            list_item = QListWidgetItem(display)
-            list_item.setData(Qt.ItemDataRole.UserRole, remote_path)
-            list_item.setData(Qt.ItemDataRole.UserRole + 1, entry_type)
-            self.manage_file_list.addItem(list_item)
+        self.manage_file_tree.clear()
+        root_item = self._manage_create_tree_item(
+            name=self._manage_tree_root_display_name(current_dir),
+            remote_path=current_dir,
+            entry_type="dir",
+            loaded=True,
+        )
+        shown_count = self._manage_populate_tree_children(root_item, entries)
+        self.manage_file_tree.addTopLevelItem(root_item)
+        root_item.setExpanded(True)
+        self.manage_file_tree.setCurrentItem(root_item)
 
         self.manage_current_directory = current_dir
-        self.manage_current_dir_label.setText(f"Browsing: {current_dir}")
+        self.manage_current_dir_label.setText(f"Tree root: {current_dir}")
         self.manage_remote_dir_edit.setText(current_dir)
         self.manage_current_remote_file = None
         self.manage_current_file_label.setText("No file loaded.")
         self.manage_file_editor.clear()
         self._append_manage_log(
-            f"Loaded {len(entries)} entries from {current_dir}."
+            f"Loaded {shown_count} entries from {current_dir}."
         )
         self._set_device_connection_health(True, f"Host {params['host']} reachable.")
-        self.statusBar().showMessage(f"Loaded {len(entries)} entries", 2500)
+        self.statusBar().showMessage(f"Loaded {shown_count} entries", 2500)
 
     def _manage_file_selection_changed(self) -> None:
-        selected = self.manage_file_list.selectedItems()
-        if not selected:
+        item = self._manage_selected_tree_item()
+        if item is None:
             return
-        item = selected[0]
-        remote_path = str(item.data(Qt.ItemDataRole.UserRole) or item.text())
-        entry_type = str(item.data(Qt.ItemDataRole.UserRole + 1) or "file")
+        remote_path = str(item.data(0, self._manage_tree_path_role()) or "").strip()
+        entry_type = str(item.data(0, self._manage_tree_type_role()) or "file")
+        if not remote_path:
+            return
         if entry_type == "dir":
+            self.manage_current_directory = remote_path
             self.manage_current_file_label.setText(f"Selected folder: {remote_path}")
         else:
             self.manage_current_file_label.setText(f"Selected file: {remote_path}")
@@ -2202,17 +2963,20 @@ class MainWindow(QMainWindow):
         if params is None:
             return
 
-        selected = self.manage_file_list.selectedItems()
-        if not selected:
+        selected = self._manage_selected_tree_item()
+        if selected is None:
             self._show_error("Manage Printer", "Select a remote file or folder first.")
             return
-        remote_path = str(selected[0].data(Qt.ItemDataRole.UserRole) or selected[0].text()).strip()
-        entry_type = str(selected[0].data(Qt.ItemDataRole.UserRole + 1) or "file")
+        remote_path = str(selected.data(0, self._manage_tree_path_role()) or "").strip()
+        entry_type = str(selected.data(0, self._manage_tree_type_role()) or "file")
         if not remote_path:
             self._show_error("Manage Printer", "Selected item has an invalid file path.")
             return
         if entry_type == "dir":
-            self._manage_refresh_files(target_dir=remote_path)
+            if self._manage_load_tree_item(selected, service=service, params=params):
+                selected.setExpanded(True)
+                self.manage_current_directory = remote_path
+                self.manage_remote_dir_edit.setText(remote_path)
             return
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -2243,13 +3007,15 @@ class MainWindow(QMainWindow):
 
         remote_path = self.manage_current_remote_file
         if not remote_path:
-            selected = self.manage_file_list.selectedItems()
-            if selected:
-                selected_type = str(selected[0].data(Qt.ItemDataRole.UserRole + 1) or "file")
+            selected = self._manage_selected_tree_item()
+            if selected is not None:
+                selected_type = str(selected.data(0, self._manage_tree_type_role()) or "file")
                 if selected_type != "file":
                     self._show_error("Manage Printer", "Select and open a file before saving.")
                     return
-                remote_path = str(selected[0].data(Qt.ItemDataRole.UserRole) or selected[0].text()).strip()
+                remote_path = str(
+                    selected.data(0, self._manage_tree_path_role()) or ""
+                ).strip()
         if not remote_path:
             self._show_error("Manage Printer", "No remote file is loaded for saving.")
             return
@@ -2271,6 +3037,61 @@ class MainWindow(QMainWindow):
         self._append_manage_log(f"Saved {saved_path}.")
         self._set_device_connection_health(True, f"Saved {saved_path}.")
         self.statusBar().showMessage("Remote file saved", 2500)
+
+    def _manage_current_cfg_context(self) -> tuple[str, str] | None:
+        remote_path = (self.manage_current_remote_file or "").strip()
+        if not remote_path:
+            self._show_error("Manage Printer", "Open a remote .cfg file first.")
+            return None
+        if not remote_path.lower().endswith(".cfg"):
+            self._show_error("Manage Printer", "Current remote file is not a .cfg file.")
+            return None
+        return self.manage_file_editor.toPlainText(), remote_path
+
+    def _manage_validate_current_file(self) -> None:
+        context = self._manage_current_cfg_context()
+        if context is None:
+            return
+        content, remote_path = context
+        report = self.firmware_tools_service.validate_cfg(content, source_label=remote_path)
+        blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
+        warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        self._append_manage_log(
+            f"Validation for {remote_path}: blocking={blocking}, warnings={warnings}."
+        )
+        self._set_device_connection_health(
+            blocking == 0,
+            f"{remote_path}: blocking={blocking}, warnings={warnings}",
+        )
+        if blocking > 0:
+            details = self._build_cfg_validation_details(report)
+            self._show_error(
+                "Manage Printer",
+                f"{remote_path}: blocking={blocking}, warnings={warnings}\n\n{details}",
+            )
+        elif warnings > 0:
+            QMessageBox.warning(
+                self,
+                "Manage Printer",
+                f"{remote_path}: warnings={warnings}\n\n{self._build_cfg_validation_details(report)}",
+            )
+        else:
+            self.statusBar().showMessage("Remote firmware validation passed", 3000)
+
+    def _manage_refactor_current_file(self) -> None:
+        context = self._manage_current_cfg_context()
+        if context is None:
+            return
+        content, remote_path = context
+        updated, changes = self.firmware_tools_service.refactor_cfg(content)
+        if updated != content:
+            self.manage_file_editor.setPlainText(updated)
+            self._append_manage_log(f"Refactored {remote_path}: {changes} change(s).")
+            self.statusBar().showMessage(f"Refactored remote file ({changes} change(s))", 3000)
+        else:
+            self._append_manage_log(f"No refactor changes for {remote_path}.")
+            self.statusBar().showMessage("No refactor changes for remote file", 2500)
+        self._manage_validate_current_file()
 
     def _manage_create_backup(self) -> None:
         service = self._get_ssh_service()
@@ -2471,11 +3292,409 @@ class MainWindow(QMainWindow):
             "key_path": key_path,
         }
 
+    def _refresh_saved_connection_profiles(self, select_name: str | None = None) -> None:
+        try:
+            names = self.saved_connection_service.list_names()
+        except OSError as exc:
+            self._append_ssh_log(f"Failed to load saved connections: {exc}")
+            return
+
+        self.ssh_saved_connection_combo.blockSignals(True)
+        self.ssh_saved_connection_combo.clear()
+        self.ssh_saved_connection_combo.addItems(names)
+        self.ssh_saved_connection_combo.blockSignals(False)
+
+        target_name = (select_name or "").strip()
+        if target_name:
+            index = self.ssh_saved_connection_combo.findText(target_name)
+            if index >= 0:
+                self.ssh_saved_connection_combo.setCurrentIndex(index)
+                return
+        if self.ssh_saved_connection_combo.count() > 0:
+            self.ssh_saved_connection_combo.setCurrentIndex(0)
+
+    def _build_connection_profile_payload(self) -> dict[str, Any] | None:
+        host = self.ssh_host_edit.text().strip()
+        username = self.ssh_username_edit.text().strip()
+        if not host or not username:
+            self._show_error("SSH Input Error", "Host and username are required to save a profile.")
+            return None
+        return {
+            "host": host,
+            "port": int(self.ssh_port_spin.value()),
+            "username": username,
+            "key_path": self.ssh_key_path_edit.text().strip() or None,
+            "remote_dir": self.ssh_remote_dir_edit.text().strip() or "~/printer_data/config",
+            "remote_file": self.ssh_remote_fetch_path_edit.text().strip()
+            or "~/printer_data/config/printer.cfg",
+        }
+
+    def _save_named_connection_profile(self, name: str, announce: bool = True) -> bool:
+        profile_name = name.strip()
+        if not profile_name:
+            self._show_error("Saved Connections", "Connection name is required.")
+            return False
+        payload = self._build_connection_profile_payload()
+        if payload is None:
+            return False
+        try:
+            self.saved_connection_service.save(profile_name, payload)
+        except (OSError, ValueError) as exc:
+            self._show_error("Saved Connections", str(exc))
+            return False
+
+        self._refresh_saved_connection_profiles(select_name=profile_name)
+        self.ssh_connection_name_edit.setText(profile_name)
+        if announce:
+            self._append_ssh_log(f"Saved connection profile '{profile_name}'.")
+            self.statusBar().showMessage(f"Saved connection '{profile_name}'", 2500)
+        return True
+
+    def _save_current_connection_profile(self) -> None:
+        profile_name = self.ssh_connection_name_edit.text().strip()
+        if not profile_name:
+            self._show_error(
+                "Saved Connections",
+                "Set a connection name before saving.",
+            )
+            return
+        self._save_named_connection_profile(profile_name)
+
+    def _load_selected_saved_connection(self) -> None:
+        profile_name = self.ssh_saved_connection_combo.currentText().strip()
+        if not profile_name:
+            self._show_error("Saved Connections", "No saved connection selected.")
+            return
+        profile = self.saved_connection_service.load(profile_name)
+        if profile is None:
+            self._show_error("Saved Connections", f"Connection '{profile_name}' was not found.")
+            self._refresh_saved_connection_profiles()
+            return
+
+        self.ssh_connection_name_edit.setText(profile_name)
+        self.ssh_host_edit.setText(str(profile.get("host") or ""))
+        try:
+            port_value = int(profile.get("port") or 22)
+        except (TypeError, ValueError):
+            port_value = 22
+        self.ssh_port_spin.setValue(port_value)
+        self.ssh_username_edit.setText(str(profile.get("username") or ""))
+        self.ssh_key_path_edit.setText(str(profile.get("key_path") or ""))
+        self.ssh_remote_dir_edit.setText(
+            str(profile.get("remote_dir") or "~/printer_data/config")
+        )
+        self.ssh_remote_fetch_path_edit.setText(
+            str(profile.get("remote_file") or "~/printer_data/config/printer.cfg")
+        )
+        self.manage_host_edit.setText(self.ssh_host_edit.text().strip())
+        self.manage_remote_dir_edit.setText(self.ssh_remote_dir_edit.text().strip())
+        self.modify_remote_cfg_path_edit.setText(self.ssh_remote_fetch_path_edit.text().strip())
+        self.modify_current_remote_file = None
+        self._refresh_modify_connection_summary()
+        self._append_ssh_log(f"Loaded connection profile '{profile_name}'.")
+        self._append_modify_log(f"Loaded connection profile '{profile_name}'.")
+        self.statusBar().showMessage(f"Loaded connection '{profile_name}'", 2500)
+
+    def _delete_selected_saved_connection(self) -> None:
+        profile_name = self.ssh_saved_connection_combo.currentText().strip()
+        if not profile_name:
+            self._show_error("Saved Connections", "No saved connection selected.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Saved Connection",
+            f"Delete saved connection '{profile_name}'?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        deleted = self.saved_connection_service.delete(profile_name)
+        if deleted:
+            self._append_ssh_log(f"Deleted connection profile '{profile_name}'.")
+            self.statusBar().showMessage(f"Deleted connection '{profile_name}'", 2500)
+            self._refresh_saved_connection_profiles()
+            if self.ssh_connection_name_edit.text().strip() == profile_name:
+                self.ssh_connection_name_edit.clear()
+            return
+        self._show_error("Saved Connections", f"Connection '{profile_name}' was not found.")
+
+    def _save_successful_connection_profile(self) -> None:
+        if not self.ssh_save_on_success_checkbox.isChecked():
+            return
+        profile_name = self.ssh_connection_name_edit.text().strip()
+        if not profile_name:
+            self._append_ssh_log(
+                "Connected. Set 'Connection name' to save this profile for reconnection."
+            )
+            return
+        self._save_named_connection_profile(profile_name, announce=True)
+
     def _append_ssh_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         self.ssh_log.appendPlainText(f"[{stamp}] {message}")
 
-    def _test_ssh_connection(self) -> None:
+    def _append_modify_log(self, message: str) -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.modify_log.appendPlainText(f"[{stamp}] {message}")
+
+    def _set_modify_status(self, message: str, severity: str = "info") -> None:
+        style_by_severity = {
+            "ok": (
+                "QLabel {"
+                " background-color: #14532d;"
+                " color: #ffffff;"
+                " border: 1px solid #16a34a;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                " font-weight: 600;"
+                "}"
+            ),
+            "warning": (
+                "QLabel {"
+                " background-color: #78350f;"
+                " color: #ffffff;"
+                " border: 1px solid #f59e0b;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                " font-weight: 600;"
+                "}"
+            ),
+            "error": (
+                "QLabel {"
+                " background-color: #7f1d1d;"
+                " color: #ffffff;"
+                " border: 1px solid #ef4444;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                " font-weight: 600;"
+                "}"
+            ),
+            "info": (
+                "QLabel {"
+                " background-color: #111827;"
+                " color: #e5e7eb;"
+                " border: 1px solid #374151;"
+                " border-radius: 4px;"
+                " padding: 6px 8px;"
+                "}"
+            ),
+        }
+        self.modify_status_label.setText(message)
+        self.modify_status_label.setStyleSheet(style_by_severity.get(severity, style_by_severity["info"]))
+
+    def _modify_connect(self) -> None:
+        self._connect_ssh_to_host()
+        if self.device_connected:
+            self._set_modify_status("SSH connection ready for modify workflow.", severity="ok")
+            self._append_modify_log("SSH connection verified for modify workflow.")
+
+    def _modify_open_remote_cfg(self) -> None:
+        service = self._get_ssh_service()
+        if service is None:
+            return
+
+        params = self._collect_ssh_params()
+        if params is None:
+            return
+
+        remote_path = self.modify_remote_cfg_path_edit.text().strip()
+        if not remote_path:
+            self._show_error("Modify Existing", "Remote .cfg path is required.")
+            return
+
+        self._append_modify_log(f"Opening remote file: {remote_path}")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            contents = service.fetch_file(remote_path=remote_path, **params)
+        except SSHDeployError as exc:
+            self._set_device_connection_health(False, str(exc))
+            self._set_modify_status(str(exc), severity="error")
+            self._append_modify_log(f"Open failed: {exc}")
+            self._show_error("Modify Existing", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.modify_editor.setPlainText(contents)
+        self.modify_current_remote_file = remote_path
+        self._set_device_connection_health(True, f"Opened {remote_path}.")
+        self._set_modify_status(f"Loaded {remote_path}", severity="ok")
+        self._append_modify_log(f"Loaded {remote_path}.")
+        self.statusBar().showMessage(f"Loaded {remote_path}", 2500)
+
+    def _modify_current_cfg_context(self) -> tuple[str, str] | None:
+        remote_path = self.modify_remote_cfg_path_edit.text().strip()
+        if not remote_path:
+            remote_path = (self.modify_current_remote_file or "").strip()
+        if not remote_path:
+            self._show_error("Modify Existing", "Open a remote .cfg file first.")
+            return None
+        if not remote_path.lower().endswith(".cfg"):
+            self._show_error("Modify Existing", "Current remote file is not a .cfg file.")
+            return None
+        content = self.modify_editor.toPlainText()
+        return content, remote_path
+
+    def _modify_validate_current_file(self) -> None:
+        context = self._modify_current_cfg_context()
+        if context is None:
+            return
+
+        content, remote_path = context
+        report = self.firmware_tools_service.validate_cfg(content, source_label=remote_path)
+        blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
+        warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        self._append_modify_log(
+            f"Validation for {remote_path}: blocking={blocking}, warnings={warnings}."
+        )
+
+        if blocking > 0:
+            self._set_modify_status(
+                f"{remote_path}: {blocking} blocking and {warnings} warning issue(s).",
+                severity="error",
+            )
+            self._set_device_connection_health(
+                False,
+                f"{remote_path}: blocking={blocking}, warnings={warnings}",
+            )
+            details = self._build_cfg_validation_details(report)
+            self._show_error(
+                "Modify Existing",
+                f"{remote_path}: blocking={blocking}, warnings={warnings}\n\n{details}",
+            )
+            return
+
+        if warnings > 0:
+            self._set_modify_status(
+                f"{remote_path}: warnings detected ({warnings}).",
+                severity="warning",
+            )
+            self._set_device_connection_health(
+                True,
+                f"{remote_path}: blocking=0, warnings={warnings}",
+            )
+            QMessageBox.warning(
+                self,
+                "Modify Existing",
+                f"{remote_path}: warnings={warnings}\n\n{self._build_cfg_validation_details(report)}",
+            )
+            return
+
+        self._set_modify_status(f"{remote_path}: validation passed.", severity="ok")
+        self._set_device_connection_health(True, f"{remote_path}: validation passed.")
+        self.statusBar().showMessage("Modify workflow validation passed", 2500)
+
+    def _modify_refactor_current_file(self) -> None:
+        context = self._modify_current_cfg_context()
+        if context is None:
+            return
+        content, remote_path = context
+        updated, changes = self.firmware_tools_service.refactor_cfg(content)
+        if updated != content:
+            self.modify_editor.setPlainText(updated)
+            self._append_modify_log(f"Refactored {remote_path}: {changes} change(s).")
+            self._set_modify_status(
+                f"Refactored {remote_path}: {changes} change(s).",
+                severity="info",
+            )
+            self.statusBar().showMessage(f"Refactored {remote_path}", 2500)
+        else:
+            self._append_modify_log(f"No refactor changes for {remote_path}.")
+            self._set_modify_status(f"No refactor changes for {remote_path}.", severity="info")
+        self._modify_validate_current_file()
+
+    def _modify_upload_current_file(self) -> None:
+        service = self._get_ssh_service()
+        if service is None:
+            return
+        params = self._collect_ssh_params()
+        if params is None:
+            return
+
+        context = self._modify_current_cfg_context()
+        if context is None:
+            return
+        content, remote_path = context
+        if not content.strip():
+            self._show_error("Modify Existing", "Current editor content is empty.")
+            return
+
+        backup_root = self.modify_backup_root_edit.text().strip() or "~/klippconfig_backups"
+        remote_dir = posixpath.dirname(remote_path.rstrip("/")) or "."
+
+        self._append_modify_log(f"Creating backup from {remote_dir} into {backup_root}.")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            backup_path = service.create_backup(
+                remote_dir=remote_dir,
+                backup_root=backup_root,
+                **params,
+            )
+            saved_path = service.write_file(
+                remote_path=remote_path,
+                content=content,
+                **params,
+            )
+        except SSHDeployError as exc:
+            self._set_device_connection_health(False, str(exc))
+            self._set_modify_status(str(exc), severity="error")
+            self._append_modify_log(f"Upload failed: {exc}")
+            self._show_error("Modify Existing", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.modify_current_remote_file = saved_path
+        self.modify_remote_cfg_path_edit.setText(saved_path)
+        self._append_modify_log(f"Backup created: {backup_path}")
+        self._append_modify_log(f"Uploaded file: {saved_path}")
+        self._set_modify_status(
+            f"Uploaded {saved_path} (backup: {backup_path})",
+            severity="ok",
+        )
+        self._set_device_connection_health(True, f"Uploaded {saved_path}.")
+        self.statusBar().showMessage("Modify workflow upload complete", 3000)
+
+    def _modify_test_restart(self) -> None:
+        service = self._get_ssh_service()
+        if service is None:
+            return
+        params = self._collect_ssh_params()
+        if params is None:
+            return
+
+        restart_command = self.ssh_restart_cmd_edit.text().strip() or "sudo systemctl restart klipper"
+        self._append_modify_log(f"Running restart/status command: {restart_command}")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            output = service.run_remote_command(
+                command=restart_command,
+                **params,
+            ).strip()
+        except SSHDeployError as exc:
+            self._set_device_connection_health(False, str(exc))
+            self._set_modify_status(str(exc), severity="error")
+            self._append_modify_log(f"Restart test failed: {exc}")
+            self._show_error("Modify Existing", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        summary = output or "(no output)"
+        self._set_modify_status(f"Restart command succeeded: {summary}", severity="ok")
+        self._append_modify_log(f"Restart output: {summary}")
+        self._set_device_connection_health(True, f"Restart command succeeded on {params['host']}.")
+        self.statusBar().showMessage("Restart test succeeded", 3000)
+
+    def _resolve_connected_printer_name(self, host: str) -> str:
+        name = self.ssh_connection_name_edit.text().strip()
+        if name:
+            return name
+        saved_name = self.ssh_saved_connection_combo.currentText().strip()
+        if saved_name:
+            return saved_name
+        return host
+
+    def _connect_ssh_to_host(self) -> None:
         service = self._get_ssh_service()
         if service is None:
             return
@@ -2485,23 +3704,52 @@ class MainWindow(QMainWindow):
             return
 
         self._append_ssh_log(
-            f"Testing connection to {params['username']}@{params['host']}:{params['port']}"
+            f"Connecting to {params['username']}@{params['host']}:{params['port']}"
         )
         try:
             ok, output = service.test_connection(**params)
         except SSHDeployError as exc:
             self._set_device_connection_health(False, str(exc))
+            self._set_manage_connected_printer_display(None, None, connected=False)
+            self._set_modify_connected_printer_display(None, None, connected=False)
             self._append_ssh_log(str(exc))
-            self._show_error("SSH Test Failed", str(exc))
+            self._append_modify_log(f"Connect failed: {exc}")
+            self._set_modify_status(str(exc), severity="error")
+            self._show_error("SSH Connect Failed", str(exc))
             return
 
         if ok:
             self._set_device_connection_health(True, str(output))
-            self._append_ssh_log(f"Connection successful: {output}")
-            self.statusBar().showMessage("SSH connection successful", 2500)
+            printer_name = self._resolve_connected_printer_name(str(params["host"]))
+            self._set_manage_connected_printer_display(
+                printer_name=printer_name,
+                host=str(params["host"]),
+                connected=True,
+            )
+            self._set_modify_connected_printer_display(
+                printer_name=printer_name,
+                host=str(params["host"]),
+                connected=True,
+            )
+            self.manage_host_edit.setText(str(params["host"]).strip())
+            self._append_manage_log(
+                f"Connected printer: {printer_name} ({params['host']})"
+            )
+            self._append_ssh_log(f"Connected: {output}")
+            self._append_modify_log(f"Connected: {output}")
+            self._set_modify_status(f"Connected to {printer_name}", severity="ok")
+            self._save_successful_connection_profile()
+            self.statusBar().showMessage(f"Connected to {printer_name}", 2500)
             return
         self._set_device_connection_health(False, str(output))
+        self._set_manage_connected_printer_display(None, None, connected=False)
+        self._set_modify_connected_printer_display(None, None, connected=False)
         self._append_ssh_log(f"Connection failed: {output}")
+        self._append_modify_log(f"Connection failed: {output}")
+        self._set_modify_status(f"Connection failed: {output}", severity="error")
+
+    def _test_ssh_connection(self) -> None:
+        self._connect_ssh_to_host()
 
     def _fetch_remote_cfg_file(self) -> None:
         service = self._get_ssh_service()

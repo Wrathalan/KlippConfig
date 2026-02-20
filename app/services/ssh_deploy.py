@@ -81,6 +81,25 @@ class SSHDeployService:
         finally:
             client.close()
 
+    def run_remote_command(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        command: str,
+        password: str | None = None,
+        key_path: str | None = None,
+        timeout: float = 30.0,
+    ) -> str:
+        command_text = command.strip()
+        if not command_text:
+            raise SSHDeployError("Remote command is empty.")
+        client = self.connect(host, port, username, password, key_path)
+        try:
+            return self.run_command(client, command_text, timeout=timeout)
+        finally:
+            client.close()
+
     @staticmethod
     def run_command(client: "paramiko.SSHClient", command: str, timeout: float = 30.0) -> str:
         try:

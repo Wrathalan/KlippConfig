@@ -21,3 +21,10 @@ def schemas_dir() -> Path:
 def templates_dir() -> Path:
     return app_root() / "templates"
 
+
+def icon_path() -> Path:
+    return app_root() / "assets" / "icon.ico"
+
+
+def creator_icon_path() -> Path:
+    return app_root() / "assets" / "creator.ico"

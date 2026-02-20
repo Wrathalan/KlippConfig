@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
 import app.ui.main_window as main_window_module
@@ -82,6 +81,24 @@ class FakeManageSSHService:
         return kwargs["local_destination"]
 
 
+def _walk_tree_items(tree_widget):
+    stack = [tree_widget.topLevelItem(index) for index in range(tree_widget.topLevelItemCount())]
+    while stack:
+        item = stack.pop()
+        yield item
+        for child_index in range(item.childCount() - 1, -1, -1):
+            stack.append(item.child(child_index))
+
+
+def _find_tree_item_by_path(window: MainWindow, remote_path: str):
+    role = window._manage_tree_path_role()
+    for item in _walk_tree_items(window.manage_file_tree):
+        value = item.data(0, role)
+        if str(value or "") == remote_path:
+            return item
+    return None
+
+
 def test_manage_printer_tab_file_edit_and_backup_flow(qtbot, monkeypatch, tmp_path) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
@@ -96,11 +113,11 @@ def test_manage_printer_tab_file_edit_and_backup_flow(qtbot, monkeypatch, tmp_pa
     window._use_ssh_host_for_manage()
 
     window._manage_refresh_files()
-    assert window.manage_file_list.count() >= 2
+    assert window.manage_file_tree.topLevelItemCount() == 1
 
-    file_items = window.manage_file_list.findItems("printer.cfg", Qt.MatchFlag.MatchExactly)
-    assert file_items
-    window.manage_file_list.setCurrentItem(file_items[0])
+    printer_item = _find_tree_item_by_path(window, "/home/pi/printer_data/config/printer.cfg")
+    assert printer_item is not None
+    window.manage_file_tree.setCurrentItem(printer_item)
     window._manage_open_selected_file()
     assert "printer.cfg" in window.manage_current_file_label.text()
 
@@ -140,20 +157,20 @@ def test_manage_printer_can_explore_directories(qtbot) -> None:
     window._use_ssh_host_for_manage()
 
     window._manage_refresh_files()
-    assert "Browsing: /home/pi/printer_data/config" in window.manage_current_dir_label.text()
+    assert "Tree root: /home/pi/printer_data/config" in window.manage_current_dir_label.text()
 
-    dir_items = window.manage_file_list.findItems("extras/", Qt.MatchFlag.MatchExactly)
-    assert dir_items
-    window.manage_file_list.setCurrentItem(dir_items[0])
+    extras_item = _find_tree_item_by_path(window, "/home/pi/printer_data/config/extras")
+    assert extras_item is not None
+    window.manage_file_tree.setCurrentItem(extras_item)
     window._manage_open_selected_file()
-    assert "Browsing: /home/pi/printer_data/config/extras" in window.manage_current_dir_label.text()
+    assert "Tree root: /home/pi/printer_data/config/extras" in window.manage_current_dir_label.text()
 
-    up_items_before = window.manage_file_list.findItems("printer.cfg", Qt.MatchFlag.MatchExactly)
-    assert not up_items_before
+    extras_file = _find_tree_item_by_path(window, "/home/pi/printer_data/config/extras/test.cfg")
+    assert extras_file is not None
     window._manage_browse_up_directory()
-    assert "Browsing: /home/pi/printer_data/config" in window.manage_current_dir_label.text()
-    root_file_items = window.manage_file_list.findItems("printer.cfg", Qt.MatchFlag.MatchExactly)
-    assert root_file_items
+    assert "Tree root: /home/pi/printer_data/config" in window.manage_current_dir_label.text()
+    root_file_item = _find_tree_item_by_path(window, "/home/pi/printer_data/config/printer.cfg")
+    assert root_file_item is not None
 
 
 def test_manage_control_url_resolution(qtbot) -> None:
