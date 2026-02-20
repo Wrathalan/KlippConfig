@@ -40,13 +40,25 @@ class ValidationService:
                 field=self._as_reportable_path(list(err.absolute_path)),
             )
 
+        board_profile = preset.board_profiles.get(project.board) or get_board_profile(project.board)
         if project.board not in preset.supported_boards:
-            report.add(
-                severity="blocking",
-                code="BOARD_UNSUPPORTED",
-                message=f"Board '{project.board}' is not supported by preset '{preset.name}'.",
-                field="board",
-            )
+            if board_profile is None:
+                report.add(
+                    severity="blocking",
+                    code="BOARD_UNKNOWN",
+                    message=f"Board '{project.board}' is unknown.",
+                    field="board",
+                )
+            else:
+                report.add(
+                    severity="warning",
+                    code="BOARD_NOT_CURATED",
+                    message=(
+                        f"Board '{project.board}' is not in preset '{preset.name}' curated list. "
+                        "Validate pins and motor/heater mapping before deploy."
+                    ),
+                    field="board",
+                )
 
         unsupported_addons = [
             addon
@@ -109,19 +121,6 @@ class ValidationService:
                     message="Toolhead board is enabled but no board is selected.",
                     field="toolhead.board",
                 )
-            elif preset.supported_toolhead_boards and (
-                project.toolhead.board not in preset.supported_toolhead_boards
-            ):
-                report.add(
-                    severity="blocking",
-                    code="TOOLHEAD_BOARD_UNSUPPORTED",
-                    message=(
-                        f"Toolhead board '{project.toolhead.board}' is not supported "
-                        f"by preset '{preset.name}'."
-                    ),
-                    field="toolhead.board",
-                )
-
             profile = (
                 get_toolhead_board_profile(project.toolhead.board)
                 if project.toolhead.board
@@ -132,6 +131,16 @@ class ValidationService:
                     severity="blocking",
                     code="TOOLHEAD_BOARD_UNKNOWN",
                     message=f"Unknown toolhead board '{project.toolhead.board}'.",
+                    field="toolhead.board",
+                )
+            elif project.toolhead.board not in preset.supported_toolhead_boards:
+                report.add(
+                    severity="warning",
+                    code="TOOLHEAD_BOARD_NOT_CURATED",
+                    message=(
+                        f"Toolhead board '{project.toolhead.board}' is not in preset "
+                        f"'{preset.name}' curated list. Verify pinout and CAN mapping."
+                    ),
                     field="toolhead.board",
                 )
 
@@ -215,7 +224,6 @@ class ValidationService:
             )
 
         pins = {}
-        board_profile = preset.board_profiles.get(project.board) or get_board_profile(project.board)
         if board_profile:
             pins.update(board_profile.pins)
         if project.toolhead.enabled and project.toolhead.board:

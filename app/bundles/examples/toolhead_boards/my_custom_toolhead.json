@@ -1,0 +1,22 @@
+{
+  "id": "my_custom_toolhead",
+  "label": "My Custom Toolhead",
+  "mcu": "rp2040",
+  "serial_hint": "canbus_uuid: replace-with-uuid",
+  "pins": {
+    "extruder_step": "toolhead:EXT_STEP",
+    "extruder_dir": "toolhead:EXT_DIR",
+    "extruder_enable": "toolhead:EXT_EN",
+    "heater_hotend": "toolhead:HE0",
+    "temp_hotend": "toolhead:TH0",
+    "probe": "toolhead:PROBE",
+    "toolhead_fan": "toolhead:FAN0",
+    "part_cooling_fan": "toolhead:FAN1",
+    "filament_sensor": "toolhead:FS0"
+  },
+  "layout": {
+    "Motor and Heater": ["EXT_STEP", "EXT_DIR", "EXT_EN", "HE0"],
+    "Sensors": ["TH0", "PROBE", "FS0"],
+    "Fans and IO": ["FAN0", "FAN1", "RGB", "GPIO"]
+  }
+}

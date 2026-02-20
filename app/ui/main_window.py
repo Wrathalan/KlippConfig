@@ -840,6 +840,7 @@ class MainWindow(QMainWindow):
 
         self.addons_group = QGroupBox("Add-ons", options_group)
         addons_layout = QVBoxLayout(self.addons_group)
+        self.addons_layout = addons_layout
         self.addon_checkboxes: dict[str, QCheckBox] = {}
         for key, label in self.addon_options.items():
             checkbox = QCheckBox(label, self.addons_group)
@@ -1588,6 +1589,11 @@ class MainWindow(QMainWindow):
                 preset_supported_addons=preset.supported_addons,
             )
         }
+        for addon_name in preset.supported_addons:
+            if addon_name not in self.addon_checkboxes:
+                self._add_addon_checkbox(addon_name)
+                supported.add(addon_name)
+
         for addon_name, checkbox in self.addon_checkboxes.items():
             is_supported = addon_name in supported
             checkbox.setEnabled(is_supported)
@@ -1595,6 +1601,22 @@ class MainWindow(QMainWindow):
                 checkbox.blockSignals(True)
                 checkbox.setChecked(False)
                 checkbox.blockSignals(False)
+
+    def _add_addon_checkbox(self, addon_name: str) -> None:
+        if addon_name in self.addon_checkboxes:
+            return
+        if not hasattr(self, "addons_layout"):
+            return
+
+        profile = get_addon_profile(addon_name)
+        label = profile.label if profile else addon_name
+        checkbox = QCheckBox(label, self.addons_group)
+        checkbox.setObjectName(f"addon_{addon_name}")
+        checkbox.toggled.connect(
+            lambda checked, name=addon_name: self._on_addon_checkbox_toggled(name, checked)
+        )
+        self.addons_layout.addWidget(checkbox)
+        self.addon_checkboxes[addon_name] = checkbox
 
     def _on_macro_checkbox_toggled(self, _macro_name: str, _checked: bool) -> None:
         self._render_and_validate()

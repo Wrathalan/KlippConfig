@@ -1,0 +1,33 @@
+{
+  "id": "my_custom_mainboard",
+  "label": "My Custom Mainboard",
+  "mcu": "stm32f446xx",
+  "serial_hint": "/dev/serial/by-id/usb-My_Custom_Mainboard",
+  "pins": {
+    "stepper_x_step": "PB13",
+    "stepper_x_dir": "PB12",
+    "stepper_x_enable": "PB14",
+    "stepper_y_step": "PB10",
+    "stepper_y_dir": "PB2",
+    "stepper_y_enable": "PB11",
+    "stepper_z_step": "PE2",
+    "stepper_z_dir": "PE3",
+    "stepper_z_enable": "PE1",
+    "extruder_step": "PE6",
+    "extruder_dir": "PA14",
+    "extruder_enable": "PE0",
+    "heater_bed": "PA1",
+    "heater_hotend": "PA2",
+    "temp_bed": "PF3",
+    "temp_hotend": "PF4",
+    "probe": "PG15",
+    "toolhead_fan": "PA8",
+    "part_cooling_fan": "PA9",
+    "filament_sensor": "PG12"
+  },
+  "layout": {
+    "Stepper Drivers": ["M0(X)", "M1(Y)", "M2(Z0)", "M3(E0)"],
+    "Heaters": ["HE0", "BED"],
+    "Thermistors": ["T0", "TB"]
+  }
+}

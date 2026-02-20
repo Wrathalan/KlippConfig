@@ -28,6 +28,7 @@ Write-Host "[3/5] Building self-contained no-console binary..."
     --icon "assets\icon.ico" `
     --add-data "app\presets;app\presets" `
     --add-data "app\templates;app\templates" `
+    --add-data "app\bundles;app\bundles" `
     --add-data "assets;app\assets" `
     app\main.py
 

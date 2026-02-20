@@ -19,6 +19,7 @@ It generates full Klipper config packs from curated Voron presets.
 - Optional CAN toolhead board selection and `toolhead.cfg` generation
 - Includes LDO Nitehawk toolhead board options
 - Expanded mainboard catalog with board pin aliases and board layout output
+- Config bundle system for drop-in board/toolhead/add-on support (`%APPDATA%\KlippConfig\bundles`)
 - LED control settings (pin, chain count, color order, initial color) with generated `leds.cfg`
 - Add-on packs including AMS-style and other multi-material systems
 - Files tab with raw/form `.cfg` editing and section override editor
@@ -103,6 +104,26 @@ pytest
 7. Use `Download Selected Backup to Desktop` to copy a remote backup locally.
 8. Use `Open Control Window` to open the printer UI (Mainsail/Fluidd) in an embedded web view.
 9. Use `Refactor Current .cfg` and `Validate Current .cfg` for existing remote firmware files.
+
+## Config Bundles (Boards/Add-ons)
+
+Use bundles to add support without editing Python code:
+
+1. Create files under `%APPDATA%\KlippConfig\bundles`:
+1. `boards\*.json`
+2. `toolhead_boards\*.json`
+3. `addons\*.json`
+4. `templates\...` for add-on templates
+2. Launch/restart KlippConfig.
+3. New boards/toolhead boards appear in `Configuration`.
+4. New add-ons appear in `Configuration -> Add-ons` when compatible with the preset family.
+
+Reference examples and format docs:
+
+- `app/bundles/README.md`
+- `app/bundles/examples/boards/my_custom_mainboard.json`
+- `app/bundles/examples/toolhead_boards/my_custom_toolhead.json`
+- `app/bundles/examples/addons/chamber_heater.json`
 
 ## Files Tab (Existing Firmware)
 

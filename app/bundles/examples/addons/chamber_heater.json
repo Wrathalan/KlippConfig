@@ -1,0 +1,9 @@
+{
+  "id": "chamber_heater",
+  "label": "Chamber Heater",
+  "template": "addons/chamber_heater.cfg.j2",
+  "description": "Basic heater and chamber fan scaffold for enclosed Voron builds.",
+  "multi_material": false,
+  "recommends_toolhead": false,
+  "supported_families": ["voron"]
+}
