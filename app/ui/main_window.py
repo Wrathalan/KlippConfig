@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
         self.preview_validation_cache: dict[str, tuple[int, int]] = {}
         self.preview_connected_printer_name: str | None = None
         self.preview_connected_host: str | None = None
+        self.about_window: QMainWindow | None = None
 
         self._build_ui()
         self._load_presets()
@@ -294,7 +295,6 @@ class MainWindow(QMainWindow):
         self.live_deploy_tab = self._build_live_deploy_tab()
         self.modify_existing_tab = self._build_modify_existing_tab()
         self.manage_printer_tab = self._build_manage_printer_tab()
-        self.about_tab = self._build_about_tab()
 
         self.tabs.addTab(self.main_tab, "Main")
         self.tabs.addTab(self.wizard_tab, "Configuration")
@@ -302,10 +302,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.live_deploy_tab, "SSH")
         self.tabs.addTab(self.modify_existing_tab, "Modify Existing")
         self.tabs.addTab(self.manage_printer_tab, "Manage Printer")
-        self.tabs.addTab(self.about_tab, "About")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.setCentralWidget(root)
+        self._ensure_about_window()
         self._build_footer_connection_health()
         self._set_manage_connected_printer_display(None, None, connected=False)
         self._set_modify_connected_printer_display(None, None, connected=False)
@@ -936,6 +936,11 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         self._build_ui_scale_menu(view_menu)
 
+        help_menu = self.menuBar().addMenu("&Help")
+        self.help_about_action = QAction("About KlippConfig", self)
+        self.help_about_action.triggered.connect(self._show_about_window)
+        help_menu.addAction(self.help_about_action)
+
     def _build_ui_scale_menu(self, view_menu) -> None:
         scale_menu = view_menu.addMenu("UI Scale")
         action_group = QActionGroup(self)
@@ -986,8 +991,22 @@ class MainWindow(QMainWindow):
     def _go_to_ssh_tab(self) -> None:
         self.tabs.setCurrentWidget(self.live_deploy_tab)
 
-    def _go_to_about_tab(self) -> None:
-        self.tabs.setCurrentWidget(self.about_tab)
+    def _show_about_window(self) -> None:
+        self._ensure_about_window()
+        if self.about_window is None:
+            return
+        self.about_window.show()
+        self.about_window.raise_()
+        self.about_window.activateWindow()
+
+    def _ensure_about_window(self) -> None:
+        if self.about_window is not None:
+            return
+        about_window = QMainWindow(self)
+        about_window.setWindowTitle("About KlippConfig")
+        about_window.resize(760, 700)
+        about_window.setCentralWidget(self._build_about_view(about_window))
+        self.about_window = about_window
 
     def _choose_import_source(self) -> tuple[str | None, str | None]:
         dialog = QMessageBox(self)
@@ -1364,9 +1383,14 @@ class MainWindow(QMainWindow):
         )
 
         self.main_about_btn = QPushButton("About", actions_group)
-        self.main_about_btn.clicked.connect(self._go_to_about_tab)
+        self.main_about_btn.clicked.connect(self._show_about_window)
         actions_layout.addWidget(self.main_about_btn)
-        actions_layout.addWidget(QLabel("View mission, creator info, and platform details.", actions_group))
+        actions_layout.addWidget(
+            QLabel(
+                "Open About from Help for mission, creator info, and platform details.",
+                actions_group,
+            )
+        )
 
         layout.addWidget(actions_group)
         layout.addStretch(1)
@@ -1504,11 +1528,11 @@ class MainWindow(QMainWindow):
         self._refresh_modify_connection_summary()
         return tab
 
-    def _build_about_tab(self) -> QWidget:
-        tab = QWidget(self)
-        layout = QVBoxLayout(tab)
+    def _build_about_view(self, parent: QWidget) -> QWidget:
+        view = QWidget(parent)
+        layout = QVBoxLayout(view)
 
-        scroll = QScrollArea(tab)
+        scroll = QScrollArea(view)
         scroll.setWidgetResizable(True)
         layout.addWidget(scroll, 1)
 
@@ -1607,7 +1631,7 @@ class MainWindow(QMainWindow):
 
         content_layout.addStretch(1)
         scroll.setWidget(content)
-        return tab
+        return view
 
     def _build_wizard_tab(self) -> QWidget:
         tab = QWidget(self)

@@ -1,5 +1,5 @@
 #define MyAppName "KlippConfig"
-#define MyAppVersion "0.1.2"
+#define MyAppVersion "0.1.2.1"
 #define MyAppPublisher "KlippConfig"
 #define MyAppExeName "KlippConfig.exe"
 

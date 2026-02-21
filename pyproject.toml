@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "klippconfig"
-version = "0.1.2"
+version = "0.1.2.1"
 description = "Desktop Klipper firmware configurator with curated Voron presets."
 readme = "README.md"
 requires-python = ">=3.11"

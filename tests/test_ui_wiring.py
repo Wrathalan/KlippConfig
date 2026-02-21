@@ -78,16 +78,16 @@ def test_tabs_hide_advanced_and_keep_files(qtbot) -> None:
         "SSH",
         "Modify Existing",
         "Manage Printer",
-        "About",
     ]
     assert "Advanced" not in labels
     assert "Validation" not in labels
     assert "Export" not in labels
     assert "Files" in labels
-    assert "About" in labels
+    assert "About" not in labels
     assert hasattr(window, "export_folder_action")
     assert hasattr(window, "export_zip_action")
     assert hasattr(window, "import_existing_machine_action")
+    assert hasattr(window, "help_about_action")
 
 
 def test_macro_and_addon_checkboxes_update_project(qtbot) -> None:
@@ -258,7 +258,8 @@ def test_main_tab_routes_without_resetting_configuration(qtbot) -> None:
 
     window.tabs.setCurrentWidget(window.main_tab)
     window.main_about_btn.click()
-    assert window.tabs.currentWidget() is window.about_tab
+    assert window.about_window is not None
+    assert window.about_window.isVisible()
 
 
 def test_main_tab_import_existing_machine_loads_review(qtbot, monkeypatch) -> None:
@@ -465,12 +466,15 @@ def test_load_saved_profile_populates_ssh_fields(qtbot, tmp_path) -> None:
     assert window.ssh_key_path_edit.text() == "C:/keys/printer_ed25519"
 
 
-def test_about_tab_contains_quote_and_creator_icon(qtbot) -> None:
+def test_about_window_contains_quote_and_creator_icon(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
+    window.help_about_action.trigger()
+    assert window.about_window is not None
+    assert window.about_window.isVisible()
     assert "accessibility" in window.about_quote_label.text().lower()
     pixmap = window.about_creator_icon_label.pixmap()
     has_pixmap = pixmap is not None and not pixmap.isNull()

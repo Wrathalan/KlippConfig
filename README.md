@@ -15,6 +15,7 @@ It generates full Klipper config packs from curated Voron presets.
 
 - Voron-only preset catalog, more to come
 - Main tab launcher with quick workflow entry points (`New Firmware`, `Modify Existing`, `Connect/Manage Printer`, `About`)
+- `Help -> About KlippConfig` menu entry in the command bar
 - Existing Machine Import from local ZIP/folder with auto-detected mappings and review/apply suggestions
 - Guided wizard for board, toolhead, dimensions, and core hardware choices
 - Optional CAN toolhead board selection and `toolhead.cfg` generation
@@ -87,7 +88,7 @@ pytest
 2. Click `New Firmware` to jump to `Configuration` (does not reset form state).
 3. Click `Modify Existing` to open the dedicated remote edit/upload workflow.
 4. Click `Connect/Manage Printer` to jump to `SSH`.
-5. Click `About` to jump to the about page.
+5. Click `About` to open the About window (same as `Help -> About KlippConfig`).
 
 ## Modify Existing Tab
 
@@ -145,9 +146,9 @@ Reference examples and format docs:
 4. Apply selected suggestions (high-confidence suggestions are preselected by default).
 5. Optionally save the imported profile for quick reopen using `Save Machine Profile`.
 
-## About Tab
+## About (Help Menu)
 
-1. Open the `About` tab for mission/context and platform overview.
+1. Open `Help -> About KlippConfig` from the command bar.
 2. Includes the quote about easier "accessibility" for controlling 3D printers and firmware.
 3. Shows the creator icon from `assets\creator.ico`.
 4. Includes the Discord community link: https://discord.gg/bbnAtfbY5C
