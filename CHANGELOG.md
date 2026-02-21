@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-02-20
+
+### Summary
+Feature update focused on existing machine import and bundle extensibility.
+
+### Highlights
+- Added Existing Machine Import with suggestion review plus saved machine profiles for quick reopen/re-apply.
+- Expanded config bundle support for boards, toolhead boards, and add-ons loaded from JSON bundles.
+- Improved add-on catalog modeling/loading to support richer dynamic add-on profiles.
+- Extended release tooling with Discord webhook publishing support.
+
 ## [0.1.1] - 2026-02-19
 
 ### Summary
