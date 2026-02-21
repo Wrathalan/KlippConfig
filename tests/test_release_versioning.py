@@ -49,18 +49,19 @@ def test_announcement_templates_include_expected_urls() -> None:
         summary="Summary",
         highlights=["One"],
         github_repo="Wrathalan/KlippConfig",
-        discord_url="https://discord.gg/bbnAtfbY5C",
+        discord_url="https://discord.gg/4CthQzS7Qy",
         release_date="2026-02-20",
     )
     assert "https://github.com/Wrathalan/KlippConfig/releases/tag/v0.2.0" in github
-    assert "https://discord.gg/bbnAtfbY5C" in github
+    assert "https://discord.gg/4CthQzS7Qy" in github
 
     discord = build_discord_announcement(
         version="0.2.0",
         summary="Summary",
         highlights=["One"],
         github_repo="Wrathalan/KlippConfig",
-        discord_url="https://discord.gg/bbnAtfbY5C",
+        discord_url="https://discord.gg/4CthQzS7Qy",
     )
     assert "KlippConfig v0.2.0 released" in discord
     assert "https://github.com/Wrathalan/KlippConfig/releases/tag/v0.2.0" in discord
+

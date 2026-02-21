@@ -27,7 +27,7 @@ from app.services.release_versioning import (
 from app.services.discord_webhook import post_discord_webhook
 
 
-DEFAULT_DISCORD_URL = "https://discord.gg/bbnAtfbY5C"
+DEFAULT_DISCORD_URL = "https://discord.gg/4CthQzS7Qy"
 DISCORD_WEBHOOK_ENV = "KLIPPCONFIG_DISCORD_WEBHOOK"
 
 
@@ -315,3 +315,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

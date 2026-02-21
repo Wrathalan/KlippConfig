@@ -1621,7 +1621,7 @@ class MainWindow(QMainWindow):
         community_group = QGroupBox("Community", content)
         community_layout = QVBoxLayout(community_group)
         discord_label = QLabel(
-            'Join the KlippConfig Discord: <a href="https://discord.gg/bbnAtfbY5C">https://discord.gg/bbnAtfbY5C</a>',
+            'Join the KlippConfig Discord: <a href="https://discord.gg/4CthQzS7Qy">https://discord.gg/4CthQzS7Qy</a>',
             community_group,
         )
         discord_label.setOpenExternalLinks(True)
@@ -4960,4 +4960,5 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
+
 

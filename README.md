@@ -151,7 +151,7 @@ Reference examples and format docs:
 1. Open `Help -> About KlippConfig` from the command bar.
 2. Includes the quote about easier "accessibility" for controlling 3D printers and firmware.
 3. Shows the creator icon from `assets\creator.ico`.
-4. Includes the Discord community link: https://discord.gg/bbnAtfbY5C
+4. Includes the Discord community link: https://discord.gg/4CthQzS7Qy
 
 
 ## Windows Build
@@ -165,3 +165,4 @@ Build output:
 - `dist\KlippConfig.exe` (self-contained, no console window)
 - Desktop shortcut `KlippConfig.lnk` (created by the build script)
 - Optional installer in `dist\installer` when Inno Setup (`iscc`) is on `PATH`
+
