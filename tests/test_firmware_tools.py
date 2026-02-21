@@ -49,3 +49,40 @@ def test_validate_cfg_handles_empty_content() -> None:
     report = service.validate_cfg("", source_label="empty.cfg")
     assert report.has_blocking
     assert any(finding.code == "CFG_EMPTY" for finding in report.findings)
+
+
+def test_validate_cfg_supports_include_trailing_comments_and_wildcards() -> None:
+    service = FirmwareToolsService()
+    source = (
+        "[include ./KAMP/Adaptive_Meshing.cfg]  # comment\n"
+        "[include AFC/*.cfg]\n"
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "  RESPOND MSG=\"ok\"\n"
+    )
+
+    report = service.validate_cfg(
+        source,
+        source_label="fragment.cfg",
+        role="include_fragment",
+    )
+    codes = {finding.code for finding in report.findings}
+
+    assert "CFG_SECTION_SYNTAX" not in codes
+    assert "CFG_INCLUDE_SUFFIX" not in codes
+    assert "CFG_PRINTER_SECTION_MISSING" not in codes
+    assert "CFG_COMMON_SECTION_MISSING" not in codes
+
+
+def test_validate_graph_reports_missing_include_and_cycle() -> None:
+    service = FirmwareToolsService()
+    files = {
+        "printer.cfg": "[printer]\nkinematics: corexy\n[include extras.cfg]\n[include missing.cfg]\n",
+        "extras.cfg": "[include printer.cfg]\n[gcode_macro TEST]\ngcode:\n  RESPOND MSG=\"x\"\n",
+    }
+
+    report = service.validate_graph(files, "printer.cfg")
+    codes = [finding.code for finding in report.findings]
+
+    assert "CFG_INCLUDE_MISSING" in codes
+    assert "CFG_INCLUDE_CYCLE" in codes

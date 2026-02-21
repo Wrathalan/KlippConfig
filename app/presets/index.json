@@ -1,6 +1,8 @@
 {
   "version": 1,
   "presets": [
+    "Select a preset",
+    "Custom",
     "voron_0_1",
     "voron_0_2",
     "voron_1_8",

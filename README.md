@@ -15,23 +15,27 @@ It generates full Klipper config packs from curated Voron presets.
 
 - Voron-only preset catalog, more to come
 - Main tab launcher with quick workflow entry points (`New Firmware`, `Modify Existing`, `Connect/Manage Printer`, `About`)
+- Existing Machine Import from local ZIP/folder with auto-detected mappings and review/apply suggestions
 - Guided wizard for board, toolhead, dimensions, and core hardware choices
 - Optional CAN toolhead board selection and `toolhead.cfg` generation
 - Includes LDO Nitehawk toolhead board options
 - Expanded mainboard catalog with board pin aliases and board layout output
 - Config bundle system for drop-in board/toolhead/add-on support (`%APPDATA%\KlippConfig\bundles`)
 - LED control settings (pin, chain count, color order, initial color) with generated `leds.cfg`
-- Add-on packs including AMS-style and other multi-material systems
+- Add-on packs including AMS-style systems plus AFC/KAMP/StealthBurner LEDs/Timelapse mappings
 - Files tab with raw/form `.cfg` editing and section override editor
-- Firmware tools for existing `.cfg` files: one-click refactor and validation
+- Firmware tools for existing `.cfg` files: one-click refactor and role-aware validation
+- Include-graph validation from imported root configs (wildcards, unresolved includes, cycle/conflict detection)
 - Live conflict validation banner that updates immediately on config changes
 - Live validation with blocking errors and warnings shown in `Files`
 - `Section Overrides` and `Validation Findings` are collapsed by default with unresolved-issues notice
-- Export as ZIP or folder from the bottom of `Files`
+- Export as ZIP or folder from `File` menu
 - Open existing `.cfg` files directly in-app
 - Footer device-health icon (red/green) reflects current SSH connection health
-- Live SSH deploy to Klipper hosts (test connection, upload, optional restart)
+- Live SSH deploy to Klipper hosts (connect, upload, optional restart)
+- `Tools -> Printer Connection` menu for connect/open remote/deploy/discovery actions
 - Saved SSH connection profiles (named reconnect presets)
+- Saved machine import profiles for quick reopen and re-apply
 - SSH and Manage Printer console logs are collapsible and collapsed by default
 - Network scanner to discover likely Klipper printers on your LAN
 - Dedicated `Modify Existing` remote workflow (connect -> open cfg -> refactor/validate -> upload with backup -> restart test)
@@ -67,14 +71,15 @@ pytest
 ## SSH Tab
 
 1. Open the `SSH` tab.
-2. Optionally use `Printer Discovery` to scan your LAN and pick a host.
-3. Enter or confirm SSH host, port, username, and auth credentials.
-4. Set remote Klipper config directory (default `~/printer_data/config`).
-5. Use `Connect`.
+2. Enter or confirm SSH host, port, username, and auth credentials.
+3. Set remote Klipper config directory (default `~/printer_data/config`).
+4. Use `Tools -> Printer Connection -> Connect`.
+5. Optionally run `Tools -> Printer Connection -> Scan for Printers` and then `Use Selected Host`.
 6. Set `Connection name` and keep `Save on successful connect` enabled to auto-save reconnect profiles.
 7. Use `Saved` `Load/Save/Delete` controls for quick reconnect.
-8. Use `Deploy Generated Pack` to upload the current validated pack.
-9. Optional: enable restart and provide the restart command.
+8. Use `Tools -> Printer Connection -> Open Remote File` to pull a remote cfg into `Files`.
+9. Use `Tools -> Printer Connection -> Deploy Generated Pack` to upload the current validated pack.
+10. Optional: enable restart and provide the restart command.
 
 ## Main Tab
 
@@ -127,10 +132,18 @@ Reference examples and format docs:
 
 ## Files Tab (Existing Firmware)
 
-1. Open a local `.cfg` file from `Files -> Open Local .cfg` (or load a generated file).
+1. Open a local `.cfg` file from `File -> Open .cfg File...` (or load a generated file in `Files`).
 2. Click `Refactor Current .cfg` to normalize section formatting and key/value style.
-3. Click `Validate Current .cfg` to run firmware-specific checks (syntax/common sections/duplicate keys/numeric sanity).
+3. Click `Validate Current .cfg` to run role-aware firmware checks (syntax/duplicate keys/numeric sanity). Imported machine mode validates the full include graph from root.
 4. Review the firmware validation status banner in `Files`.
+
+## Existing Machine Import
+
+1. Click `File -> Import Existing Machine...`.
+2. Choose a local config ZIP or folder.
+3. Review detected suggestions in `Files -> Import Review` (`field/value/confidence/reason/source`).
+4. Apply selected suggestions (high-confidence suggestions are preselected by default).
+5. Optionally save the imported profile for quick reopen using `Save Machine Profile`.
 
 ## About Tab
 

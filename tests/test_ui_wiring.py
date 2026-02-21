@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.ui.main_window import MainWindow
 from app.services.saved_connections import SavedConnectionService
 from app.services.ssh_deploy import SSHDeployError
@@ -83,8 +85,9 @@ def test_tabs_hide_advanced_and_keep_files(qtbot) -> None:
     assert "Export" not in labels
     assert "Files" in labels
     assert "About" in labels
-    assert window.files_tab.isAncestorOf(window.export_folder_btn)
-    assert window.files_tab.isAncestorOf(window.export_zip_btn)
+    assert hasattr(window, "export_folder_action")
+    assert hasattr(window, "export_zip_action")
+    assert hasattr(window, "import_existing_machine_action")
 
 
 def test_macro_and_addon_checkboxes_update_project(qtbot) -> None:
@@ -178,16 +181,16 @@ def test_footer_device_health_indicator_updates_from_ssh_connect(qtbot) -> None:
     window.ssh_host_edit.setText("192.168.1.20")
     window.ssh_username_edit.setText("pi")
     window.ssh_connection_name_edit.setText("Voron Lab")
-    assert window.ssh_connect_btn.text() == "Connect"
+    assert window.tools_connect_action.text() == "Connect"
 
     window.ssh_service = FakeConnectionService(ok=True, output="ok")
-    window._connect_ssh_to_host()
+    window.tools_connect_action.trigger()
     assert "Connected" in window.device_health_icon.toolTip()
     assert "Voron Lab" in window.manage_connected_printer_label.text()
     assert "Voron Lab" in window.modify_connected_printer_label.text()
 
     window.ssh_service = FakeConnectionService(ok=False, output="auth failed")
-    window._connect_ssh_to_host()
+    window.tools_connect_action.trigger()
     assert "Disconnected" in window.device_health_icon.toolTip()
     assert "No active SSH connection." in window.manage_connected_printer_label.text()
     assert "No active SSH connection." in window.modify_connected_printer_label.text()
@@ -256,6 +259,80 @@ def test_main_tab_routes_without_resetting_configuration(qtbot) -> None:
     window.tabs.setCurrentWidget(window.main_tab)
     window.main_about_btn.click()
     assert window.tabs.currentWidget() is window.about_tab
+
+
+def test_main_tab_import_existing_machine_loads_review(qtbot, monkeypatch) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    fixture_root = Path(__file__).resolve().parent / "fixtures" / "existing_machine_sample"
+    monkeypatch.setattr(
+        window,
+        "_choose_import_source",
+        lambda: (str(fixture_root), "folder"),
+    )
+
+    window.import_existing_machine_action.trigger()
+
+    assert window.tabs.currentWidget() is window.files_tab
+    assert window.current_import_profile is not None
+    assert window.import_review_table.rowCount() > 0
+    assert window.generated_file_list.count() > 0
+
+
+def test_import_apply_selected_updates_configuration_controls(qtbot, monkeypatch) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    fixture_root = Path(__file__).resolve().parent / "fixtures" / "existing_machine_sample"
+    monkeypatch.setattr(
+        window,
+        "_choose_import_source",
+        lambda: (str(fixture_root), "folder"),
+    )
+    window.import_existing_machine_action.trigger()
+
+    window._select_high_confidence_import_suggestions()
+    window._apply_selected_import_suggestions()
+
+    assert window.dimension_x.value() == 350
+    assert window.dimension_y.value() == 350
+    assert window.toolhead_enabled_checkbox.isChecked() is True
+    assert window.toolhead_canbus_uuid_edit.text() == "abcdef1234567890"
+
+
+def test_machine_profile_save_and_load_restores_import_state(qtbot, monkeypatch, tmp_path) -> None:
+    window = MainWindow()
+    window.saved_machine_profile_service.storage_path = tmp_path / "machine_profiles.json"
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    fixture_root = Path(__file__).resolve().parent / "fixtures" / "existing_machine_sample"
+    monkeypatch.setattr(
+        window,
+        "_choose_import_source",
+        lambda: (str(fixture_root), "folder"),
+    )
+    window.import_existing_machine_action.trigger()
+
+    window.machine_profile_name_edit.setText("Fixture Import")
+    window._save_current_machine_profile()
+    assert window.machine_profile_combo.findText("Fixture Import") >= 0
+
+    window.current_import_profile = None
+    window.imported_file_map = {}
+    window.import_review_table.setRowCount(0)
+    window.machine_profile_combo.setCurrentText("Fixture Import")
+    window._load_selected_machine_profile()
+
+    assert window.current_import_profile is not None
+    assert window.generated_file_list.count() > 0
+    assert window.import_review_table.rowCount() > 0
 
 
 def test_modify_existing_workflow_happy_path(qtbot) -> None:
@@ -399,3 +476,26 @@ def test_about_tab_contains_quote_and_creator_icon(qtbot) -> None:
     has_pixmap = pixmap is not None and not pixmap.isNull()
     has_fallback = bool(window.about_creator_icon_label.text().strip())
     assert has_pixmap or has_fallback
+
+
+def test_persistent_preview_removed_from_main_layout(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert not hasattr(window, "preview_panel")
+    assert not hasattr(window, "preview_toggle_action")
+
+
+def test_printer_connection_actions_available_in_tools_menu(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert window.tools_connect_action.text() == "Connect"
+    assert window.tools_open_remote_action.text() == "Open Remote File"
+    assert window.tools_deploy_action.text() == "Deploy Generated Pack"
+    assert window.tools_scan_printers_action.text() == "Scan for Printers"
+    assert window.tools_use_selected_host_action.text() == "Use Selected Host"

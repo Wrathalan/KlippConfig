@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QSettings, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -43,7 +43,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.domain.models import Preset, ProjectConfig, RenderedPack, ValidationReport
+from app.domain.models import (
+    ImportSuggestion,
+    ImportedMachineProfile,
+    Preset,
+    ProjectConfig,
+    RenderedPack,
+    ValidationReport,
+)
 from app.services.board_registry import (
     addon_supported_for_preset,
     get_addon_profile,
@@ -54,6 +61,10 @@ from app.services.board_registry import (
     list_toolhead_boards,
 )
 from app.services.exporter import ExportService
+from app.services.existing_machine_import import (
+    ExistingMachineImportError,
+    ExistingMachineImportService,
+)
 from app.services.firmware_tools import FirmwareToolsService
 from app.services.paths import creator_icon_path
 from app.services.printer_discovery import (
@@ -65,6 +76,7 @@ from app.services.preset_catalog import PresetCatalogError, PresetCatalogService
 from app.services.project_store import ProjectStoreService
 from app.services.renderer import ConfigRenderService
 from app.services.saved_connections import SavedConnectionService
+from app.services.saved_machine_profiles import SavedMachineProfileService
 from app.services.ssh_deploy import SSHDeployError, SSHDeployService
 from app.services.ui_scaling import UIScaleMode, UIScalingService
 from app.services.validator import ValidationService
@@ -168,18 +180,22 @@ class MainWindow(QMainWindow):
         ui_scaling_service: UIScalingService | None = None,
         active_scale_mode: UIScaleMode | None = None,
         saved_connection_service: SavedConnectionService | None = None,
+        app_settings: QSettings | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle(f"KlippConfig v{__version__}")
         self.resize(1380, 900)
+        self.app_settings = app_settings or QSettings("KlippConfig", "KlippConfig")
 
         self.catalog_service = PresetCatalogService()
         self.render_service = ConfigRenderService()
         self.validation_service = ValidationService()
         self.firmware_tools_service = FirmwareToolsService()
+        self.existing_machine_import_service = ExistingMachineImportService()
         self.export_service = ExportService()
         self.project_store = ProjectStoreService()
         self.saved_connection_service = saved_connection_service or SavedConnectionService()
+        self.saved_machine_profile_service = SavedMachineProfileService()
         self.ssh_service: SSHDeployService | None = None
         self.discovery_service = PrinterDiscoveryService()
         self.ui_scaling_service = ui_scaling_service or UIScalingService()
@@ -196,6 +212,11 @@ class MainWindow(QMainWindow):
         self.current_pack: RenderedPack | None = None
         self.current_report = ValidationReport()
         self.current_cfg_report = ValidationReport()
+        self.current_import_profile: ImportedMachineProfile | None = None
+        self.imported_file_map: dict[str, str] = {}
+        self.imported_file_order: list[str] = []
+        self.import_review_suggestions: list[ImportSuggestion] = []
+        self.import_profile_applied_snapshot: dict[str, Any] = {}
 
         self._applying_project = False
         self._showing_external_file = False
@@ -210,10 +231,40 @@ class MainWindow(QMainWindow):
         self._last_blocking_alert_snapshot: tuple[str, ...] = ()
         self.device_connected = False
         self.manage_control_windows: list[QMainWindow] = []
+        self.preview_content = ""
+        self.preview_source_label = ""
+        self.preview_source_kind = "generated"
+        self.preview_source_key: str | None = None
+        self.preview_pinned = self._settings_bool("ui/persistent_preview_pinned", False)
+        pinned_key_raw = self.app_settings.value("ui/persistent_preview_pinned_key", "", type=str)
+        self.preview_pinned_key = pinned_key_raw.strip() if pinned_key_raw else None
+        self.preview_last_key: str | None = None
+        self.preview_collapsed = self._settings_bool("ui/persistent_preview_collapsed", False)
+        self.preview_snippet_max_lines = 400
+        self.preview_panel_width = self._settings_int("ui/persistent_preview_width", 420)
+        self.preview_source_cache: dict[str, dict[str, str]] = {}
+        self.preview_validation_cache: dict[str, tuple[int, int]] = {}
+        self.preview_connected_printer_name: str | None = None
+        self.preview_connected_host: str | None = None
 
         self._build_ui()
         self._load_presets()
         self._render_and_validate()
+
+    def _settings_bool(self, key: str, default: bool) -> bool:
+        raw = self.app_settings.value(key, default)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        return text in {"1", "true", "yes", "on"}
+
+    def _settings_int(self, key: str, default: int) -> int:
+        raw = self.app_settings.value(key, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(60, value)
 
     def _build_addon_options(self) -> dict[str, str]:
         options: list[tuple[str, str]] = []
@@ -229,14 +280,13 @@ class MainWindow(QMainWindow):
 
         root = QWidget(self)
         root_layout = QVBoxLayout(root)
-
         self.conflict_alert_label = QLabel("", root)
         self.conflict_alert_label.setWordWrap(True)
         self.conflict_alert_label.setVisible(False)
         root_layout.addWidget(self.conflict_alert_label)
 
         self.tabs = QTabWidget(root)
-        root_layout.addWidget(self.tabs)
+        root_layout.addWidget(self.tabs, 1)
 
         self.main_tab = self._build_main_tab()
         self.wizard_tab = self._build_wizard_tab()
@@ -253,13 +303,154 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.modify_existing_tab, "Modify Existing")
         self.tabs.addTab(self.manage_printer_tab, "Manage Printer")
         self.tabs.addTab(self.about_tab, "About")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.setCentralWidget(root)
         self._build_footer_connection_health()
         self._set_manage_connected_printer_display(None, None, connected=False)
         self._set_modify_connected_printer_display(None, None, connected=False)
         self._refresh_modify_connection_summary()
+        self._refresh_saved_machine_profiles()
         self.statusBar().showMessage("Ready")
+
+    def _build_persistent_preview_panel(self, parent: QWidget) -> QWidget:
+        panel = QWidget(parent)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        title = QLabel("Persistent Preview", panel)
+        title.setStyleSheet("QLabel { font-weight: 700; }")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.preview_collapse_btn = QToolButton(panel)
+        self.preview_collapse_btn.setText("Collapse")
+        self.preview_collapse_btn.clicked.connect(self._toggle_preview_collapsed)
+        header.addWidget(self.preview_collapse_btn)
+        layout.addLayout(header)
+
+        self.preview_content_container = QWidget(panel)
+        content_layout = QVBoxLayout(self.preview_content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+
+        self.preview_source_label_widget = QLabel("No active file preview.", self.preview_content_container)
+        self.preview_source_label_widget.setWordWrap(True)
+        content_layout.addWidget(self.preview_source_label_widget)
+
+        badges = QHBoxLayout()
+        self.preview_kind_badge = QLabel("Source: none", self.preview_content_container)
+        self.preview_validation_badge = QLabel("Validation: n/a", self.preview_content_container)
+        self.preview_connection_badge = QLabel("Device: disconnected", self.preview_content_container)
+        badges.addWidget(self.preview_kind_badge)
+        badges.addWidget(self.preview_validation_badge)
+        badges.addWidget(self.preview_connection_badge)
+        badges.addStretch(1)
+        content_layout.addLayout(badges)
+
+        self.preview_text = QPlainTextEdit(self.preview_content_container)
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setPlaceholderText("No active file preview. Open or generate a .cfg file.")
+        content_layout.addWidget(self.preview_text, 1)
+
+        actions = QHBoxLayout()
+        self.preview_open_in_files_btn = QPushButton("Open in Files", self.preview_content_container)
+        self.preview_open_in_files_btn.clicked.connect(self._preview_open_in_files)
+        actions.addWidget(self.preview_open_in_files_btn)
+
+        self.preview_validate_btn = QPushButton("Validate", self.preview_content_container)
+        self.preview_validate_btn.clicked.connect(self._preview_validate_current)
+        actions.addWidget(self.preview_validate_btn)
+
+        self.preview_refactor_btn = QPushButton("Refactor", self.preview_content_container)
+        self.preview_refactor_btn.clicked.connect(self._preview_refactor_current)
+        actions.addWidget(self.preview_refactor_btn)
+
+        self.preview_pin_btn = QPushButton("Pin", self.preview_content_container)
+        self.preview_pin_btn.clicked.connect(self._preview_toggle_pin)
+        actions.addWidget(self.preview_pin_btn)
+
+        self.preview_copy_path_btn = QPushButton("Copy Path", self.preview_content_container)
+        self.preview_copy_path_btn.clicked.connect(self._preview_copy_path)
+        actions.addWidget(self.preview_copy_path_btn)
+        actions.addStretch(1)
+        content_layout.addLayout(actions)
+        layout.addWidget(self.preview_content_container, 1)
+
+        self._set_preview_badge_style(self.preview_kind_badge, "#111827", "#374151")
+        self._set_preview_badge_style(self.preview_validation_badge, "#111827", "#374151")
+        self._set_preview_badge_style(self.preview_connection_badge, "#111827", "#374151")
+        self._update_preview_action_enablement()
+        return panel
+
+    @staticmethod
+    def _set_preview_badge_style(label: QLabel, background: str, border: str) -> None:
+        label.setStyleSheet(
+            "QLabel {"
+            f" background-color: {background};"
+            " color: #e5e7eb;"
+            f" border: 1px solid {border};"
+            " border-radius: 4px;"
+            " padding: 2px 6px;"
+            "}"
+        )
+
+    def _apply_preview_splitter_width(self, width: int) -> None:
+        if not hasattr(self, "main_content_splitter"):
+            return
+        sizes = self.main_content_splitter.sizes()
+        if len(sizes) < 2:
+            return
+        total = sum(sizes)
+        if total <= 0:
+            total = max(self.width(), 800)
+        safe_width = max(120, min(width, total - 120))
+        self.main_content_splitter.setSizes([max(120, total - safe_width), safe_width])
+
+    def _on_main_splitter_moved(self, _pos: int, _index: int) -> None:
+        if self.preview_collapsed:
+            return
+        sizes = self.main_content_splitter.sizes()
+        if len(sizes) < 2:
+            return
+        width = max(120, int(sizes[1]))
+        self.preview_panel_width = width
+        self._persist_preview_settings()
+
+    def _toggle_preview_collapsed(self) -> None:
+        self._set_preview_collapsed(not self.preview_collapsed)
+
+    def _toggle_persistent_preview_action(self, checked: bool) -> None:
+        self._set_preview_collapsed(not checked)
+
+    def _set_preview_collapsed(self, collapsed: bool, *, persist: bool = True) -> None:
+        self.preview_collapsed = collapsed
+        if hasattr(self, "preview_content_container"):
+            self.preview_content_container.setVisible(not collapsed)
+        if hasattr(self, "preview_collapse_btn"):
+            self.preview_collapse_btn.setText("Expand" if collapsed else "Collapse")
+        if hasattr(self, "preview_toggle_action"):
+            self.preview_toggle_action.blockSignals(True)
+            self.preview_toggle_action.setChecked(not collapsed)
+            self.preview_toggle_action.setText(
+                "Show Persistent Preview" if collapsed else "Hide Persistent Preview"
+            )
+            self.preview_toggle_action.blockSignals(False)
+
+        if hasattr(self, "main_content_splitter"):
+            if collapsed:
+                sizes = self.main_content_splitter.sizes()
+                total = sum(sizes) if sizes else max(self.width(), 800)
+                self.main_content_splitter.setSizes([max(120, total - 60), 60])
+            else:
+                self._apply_preview_splitter_width(self.preview_panel_width)
+
+        if persist:
+            self._persist_preview_settings()
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._refresh_persistent_preview_for_tab_change()
 
     def _build_footer_connection_health(self) -> None:
         status_bar = self.statusBar()
@@ -287,6 +478,7 @@ class MainWindow(QMainWindow):
         if detail:
             tooltip = f"{tooltip}\n{detail}"
         self.device_health_icon.setToolTip(tooltip)
+        self._update_preview_connection_badge()
 
     def _set_connected_printer_display_label(
         self,
@@ -356,6 +548,319 @@ class MainWindow(QMainWindow):
             connected=connected,
         )
 
+    def _build_preview_source_key(
+        self,
+        source_kind: str,
+        label: str,
+        generated_name: str | None = None,
+    ) -> str:
+        normalized_kind = (source_kind or "generated").strip().lower() or "generated"
+        if normalized_kind == "generated":
+            value = (generated_name or "").strip()
+            if not value and label.lower().startswith("generated:"):
+                value = label.split(":", 1)[1].strip()
+            value = value or "printer.cfg"
+            return f"generated:{value}"
+        if normalized_kind == "remote" and label.lower().startswith("remote:"):
+            value = label.split(":", 1)[1].strip()
+            return f"remote:{value}"
+        return f"{normalized_kind}:{label.strip()}"
+
+    @staticmethod
+    def _extract_preview_path_from_label(label: str) -> str:
+        text = label.strip()
+        if ":" in text:
+            prefix, rest = text.split(":", 1)
+            if prefix.strip().lower() in {"generated", "remote"} and rest.strip():
+                return rest.strip()
+        return text
+
+    def _set_preview_validation_state(
+        self,
+        source_key: str,
+        *,
+        blocking: int,
+        warnings: int,
+    ) -> None:
+        self.preview_validation_cache[source_key] = (blocking, warnings)
+        if self.preview_source_key == source_key:
+            self._update_preview_validation_badge(source_key)
+
+    def _set_persistent_preview_source(
+        self,
+        *,
+        content: str,
+        label: str,
+        source_kind: str,
+        generated_name: str | None = None,
+        source_key: str | None = None,
+        update_last: bool = True,
+    ) -> str:
+        key = source_key or self._build_preview_source_key(source_kind, label, generated_name)
+        self.preview_source_cache[key] = {
+            "content": content,
+            "label": label,
+            "kind": source_kind,
+            "path": self._extract_preview_path_from_label(label),
+        }
+        if update_last:
+            self.preview_last_key = key
+
+        if self.preview_pinned and self.preview_pinned_key and self.preview_pinned_key != key:
+            self._refresh_persistent_preview_for_tab_change()
+            return key
+
+        self._apply_preview_source(key)
+        return key
+
+    def _apply_preview_source(self, source_key: str) -> None:
+        entry = self.preview_source_cache.get(source_key)
+        if entry is None:
+            self._show_empty_preview()
+            return
+
+        content = entry.get("content", "")
+        label = entry.get("label", "")
+        kind = entry.get("kind", "generated")
+        self.preview_content = content
+        self.preview_source_label = label
+        self.preview_source_kind = kind
+        self.preview_source_key = source_key
+
+        if hasattr(self, "preview_source_label_widget"):
+            self.preview_source_label_widget.setText(label or "No active file preview.")
+        if hasattr(self, "preview_kind_badge"):
+            self.preview_kind_badge.setText(f"Source: {kind}")
+
+        snippet = self._render_preview_snippet(content)
+        if hasattr(self, "preview_text"):
+            self.preview_text.setPlainText(snippet)
+
+        self._update_preview_validation_badge(source_key)
+        self._update_preview_connection_badge()
+        self._update_preview_action_enablement()
+
+    def _show_empty_preview(self) -> None:
+        self.preview_content = ""
+        self.preview_source_label = "No active file preview. Open or generate a .cfg file."
+        self.preview_source_kind = "none"
+        self.preview_source_key = None
+        if hasattr(self, "preview_source_label_widget"):
+            self.preview_source_label_widget.setText(self.preview_source_label)
+        if hasattr(self, "preview_kind_badge"):
+            self.preview_kind_badge.setText("Source: none")
+        if hasattr(self, "preview_text"):
+            self.preview_text.setPlainText("No active file preview. Open or generate a .cfg file.")
+        if hasattr(self, "preview_validation_badge"):
+            self.preview_validation_badge.setText("Validation: n/a")
+            self._set_preview_badge_style(self.preview_validation_badge, "#111827", "#374151")
+        self._update_preview_connection_badge()
+        self._update_preview_action_enablement()
+
+    def _resolve_preview_fallback(self) -> str | None:
+        if self.preview_pinned and self.preview_pinned_key:
+            if self.preview_pinned_key in self.preview_source_cache:
+                return self.preview_pinned_key
+
+        if self.preview_last_key and self.preview_last_key in self.preview_source_cache:
+            return self.preview_last_key
+
+        if self.current_pack is not None:
+            printer_cfg = self.current_pack.files.get("printer.cfg")
+            if printer_cfg:
+                key = "generated:printer.cfg"
+                self.preview_source_cache[key] = {
+                    "content": printer_cfg,
+                    "label": "Generated: printer.cfg",
+                    "kind": "generated",
+                    "path": "printer.cfg",
+                }
+                return key
+        return None
+
+    def _refresh_persistent_preview_for_tab_change(self) -> None:
+        key = self._resolve_preview_fallback()
+        if key is None:
+            self._show_empty_preview()
+            return
+        self._apply_preview_source(key)
+
+    def _render_preview_snippet(self, content: str) -> str:
+        lines = content.splitlines()
+        if len(lines) <= self.preview_snippet_max_lines:
+            return content
+        clipped = "\n".join(lines[: self.preview_snippet_max_lines])
+        return (
+            f"[Preview truncated to first {self.preview_snippet_max_lines} lines]\n\n"
+            f"{clipped}\n"
+        )
+
+    def _is_preview_cfg_source(self) -> bool:
+        key = self.preview_source_key
+        if not key:
+            return False
+        entry = self.preview_source_cache.get(key, {})
+        label = entry.get("label", "")
+        path = entry.get("path", "")
+        return self._is_cfg_label(label, None) or path.lower().endswith(".cfg")
+
+    def _update_preview_validation_badge(self, source_key: str | None) -> None:
+        if not hasattr(self, "preview_validation_badge"):
+            return
+        if not source_key or source_key not in self.preview_validation_cache:
+            self.preview_validation_badge.setText("Validation: n/a")
+            self._set_preview_badge_style(self.preview_validation_badge, "#111827", "#374151")
+            return
+
+        blocking, warnings = self.preview_validation_cache[source_key]
+        if blocking > 0:
+            self.preview_validation_badge.setText(f"Validation: {blocking} blocking / {warnings} warning")
+            self._set_preview_badge_style(self.preview_validation_badge, "#7f1d1d", "#ef4444")
+            return
+        if warnings > 0:
+            self.preview_validation_badge.setText(f"Validation: warnings ({warnings})")
+            self._set_preview_badge_style(self.preview_validation_badge, "#78350f", "#f59e0b")
+            return
+        self.preview_validation_badge.setText("Validation: clean")
+        self._set_preview_badge_style(self.preview_validation_badge, "#14532d", "#16a34a")
+
+    def _update_preview_connection_badge(self) -> None:
+        if not hasattr(self, "preview_connection_badge"):
+            return
+        if self.device_connected:
+            label = "Device: connected"
+            if self.preview_connected_printer_name:
+                label = f"Device: {self.preview_connected_printer_name}"
+                if (
+                    self.preview_connected_host
+                    and self.preview_connected_host.casefold()
+                    != self.preview_connected_printer_name.casefold()
+                ):
+                    label = f"{label} ({self.preview_connected_host})"
+            self.preview_connection_badge.setText(label)
+            self._set_preview_badge_style(self.preview_connection_badge, "#14532d", "#16a34a")
+            return
+        self.preview_connection_badge.setText("Device: disconnected")
+        self._set_preview_badge_style(self.preview_connection_badge, "#111827", "#374151")
+
+    def _update_preview_action_enablement(self) -> None:
+        has_source = bool(self.preview_source_key and self.preview_source_key in self.preview_source_cache)
+        is_cfg = has_source and self._is_preview_cfg_source()
+        if hasattr(self, "preview_open_in_files_btn"):
+            self.preview_open_in_files_btn.setEnabled(has_source)
+        if hasattr(self, "preview_validate_btn"):
+            self.preview_validate_btn.setEnabled(is_cfg)
+        if hasattr(self, "preview_refactor_btn"):
+            self.preview_refactor_btn.setEnabled(is_cfg)
+        if hasattr(self, "preview_copy_path_btn"):
+            self.preview_copy_path_btn.setEnabled(has_source)
+        if hasattr(self, "preview_pin_btn"):
+            self.preview_pin_btn.setEnabled(has_source)
+            self.preview_pin_btn.setText("Unpin" if self.preview_pinned else "Pin")
+
+    def _preview_toggle_pin(self) -> None:
+        if not self.preview_source_key:
+            return
+        if self.preview_pinned and self.preview_pinned_key == self.preview_source_key:
+            self.preview_pinned = False
+            self.preview_pinned_key = None
+        else:
+            self.preview_pinned = True
+            self.preview_pinned_key = self.preview_source_key
+        self._persist_preview_settings()
+        self._update_preview_action_enablement()
+        self._refresh_persistent_preview_for_tab_change()
+
+    def _preview_copy_path(self) -> None:
+        if not self.preview_source_key:
+            return
+        entry = self.preview_source_cache.get(self.preview_source_key)
+        if entry is None:
+            return
+        value = entry.get("path", "") or entry.get("label", "")
+        QApplication.clipboard().setText(value)
+        self.statusBar().showMessage("Preview path copied", 2000)
+
+    def _preview_open_in_files(self) -> None:
+        if not self.preview_source_key:
+            return
+        entry = self.preview_source_cache.get(self.preview_source_key)
+        if entry is None:
+            return
+
+        content = entry.get("content", "")
+        label = entry.get("label", "")
+        kind = entry.get("kind", "generated")
+        path = entry.get("path", "")
+
+        if kind == "generated":
+            file_name = path or "printer.cfg"
+            if self.current_pack is not None and file_name in self.current_pack.files:
+                matches = self.generated_file_list.findItems(file_name, Qt.MatchFlag.MatchExactly)
+                if matches:
+                    self.generated_file_list.setCurrentItem(matches[0])
+                    self._showing_external_file = False
+                    self._show_selected_generated_file()
+                else:
+                    self._set_files_tab_content(
+                        content=content,
+                        label=f"Generated: {file_name}",
+                        source="generated",
+                        generated_name=file_name,
+                    )
+            else:
+                self._set_files_tab_content(
+                    content=content,
+                    label=f"Generated: {file_name}",
+                    source="generated",
+                    generated_name=file_name,
+                )
+        else:
+            self._showing_external_file = True
+            if kind in {"manage_remote", "modify_remote"}:
+                label = f"Remote: {path}" if path else label
+            self._set_files_tab_content(
+                content=content,
+                label=label,
+                source="remote" if kind.endswith("remote") else kind,
+                generated_name=None,
+            )
+        self.tabs.setCurrentWidget(self.files_tab)
+        self._refresh_persistent_preview_for_tab_change()
+
+    def _preview_validate_current(self) -> None:
+        if not self._is_preview_cfg_source():
+            return
+        key = self.preview_source_key
+        if key and key.startswith("manage_remote:"):
+            self._manage_validate_current_file()
+            return
+        if key and key.startswith("modify_remote:"):
+            self._modify_validate_current_file()
+            return
+        self._preview_open_in_files()
+        self._run_current_cfg_validation(show_dialog=False)
+
+    def _preview_refactor_current(self) -> None:
+        if not self._is_preview_cfg_source():
+            return
+        key = self.preview_source_key
+        if key and key.startswith("manage_remote:"):
+            self._manage_refactor_current_file()
+            return
+        if key and key.startswith("modify_remote:"):
+            self._modify_refactor_current_file()
+            return
+        self._preview_open_in_files()
+        self._refactor_current_cfg_file()
+
+    def _persist_preview_settings(self) -> None:
+        self.app_settings.setValue("ui/persistent_preview_collapsed", self.preview_collapsed)
+        self.app_settings.setValue("ui/persistent_preview_pinned", self.preview_pinned)
+        self.app_settings.setValue("ui/persistent_preview_pinned_key", self.preview_pinned_key or "")
+        self.app_settings.setValue("ui/persistent_preview_width", self.preview_panel_width)
+        self.app_settings.sync()
+
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
 
@@ -377,6 +882,22 @@ class MainWindow(QMainWindow):
         open_cfg_action.triggered.connect(self._open_local_cfg_file)
         file_menu.addAction(open_cfg_action)
 
+        self.import_existing_machine_action = QAction("Import Existing Machine...", self)
+        self.import_existing_machine_action.triggered.connect(
+            self._import_existing_machine_entrypoint
+        )
+        file_menu.addAction(self.import_existing_machine_action)
+
+        file_menu.addSeparator()
+
+        self.export_folder_action = QAction("Export Folder...", self)
+        self.export_folder_action.triggered.connect(self._export_folder)
+        file_menu.addAction(self.export_folder_action)
+
+        self.export_zip_action = QAction("Export ZIP...", self)
+        self.export_zip_action.triggered.connect(self._export_zip)
+        file_menu.addAction(self.export_zip_action)
+
         file_menu.addSeparator()
 
         exit_action = QAction("Exit", self)
@@ -387,6 +908,30 @@ class MainWindow(QMainWindow):
         render_action = QAction("Render + Validate", self)
         render_action.triggered.connect(self._render_and_validate)
         tools_menu.addAction(render_action)
+        tools_menu.addSeparator()
+
+        printer_connection_menu = tools_menu.addMenu("Printer Connection")
+
+        self.tools_connect_action = QAction("Connect", self)
+        self.tools_connect_action.triggered.connect(self._connect_ssh_to_host)
+        printer_connection_menu.addAction(self.tools_connect_action)
+
+        self.tools_open_remote_action = QAction("Open Remote File", self)
+        self.tools_open_remote_action.triggered.connect(self._fetch_remote_cfg_file)
+        printer_connection_menu.addAction(self.tools_open_remote_action)
+
+        self.tools_deploy_action = QAction("Deploy Generated Pack", self)
+        self.tools_deploy_action.triggered.connect(self._deploy_generated_pack)
+        printer_connection_menu.addAction(self.tools_deploy_action)
+
+        printer_connection_menu.addSeparator()
+        self.tools_scan_printers_action = QAction("Scan for Printers", self)
+        self.tools_scan_printers_action.triggered.connect(self._scan_for_printers)
+        printer_connection_menu.addAction(self.tools_scan_printers_action)
+
+        self.tools_use_selected_host_action = QAction("Use Selected Host", self)
+        self.tools_use_selected_host_action.triggered.connect(self._use_selected_discovery_host)
+        printer_connection_menu.addAction(self.tools_use_selected_host_action)
 
         view_menu = self.menuBar().addMenu("&View")
         self._build_ui_scale_menu(view_menu)
@@ -443,6 +988,330 @@ class MainWindow(QMainWindow):
 
     def _go_to_about_tab(self) -> None:
         self.tabs.setCurrentWidget(self.about_tab)
+
+    def _choose_import_source(self) -> tuple[str | None, str | None]:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Import Existing Machine")
+        dialog.setText("Choose an existing configuration source.")
+        zip_button = dialog.addButton("ZIP File", QMessageBox.ButtonRole.AcceptRole)
+        folder_button = dialog.addButton("Folder", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked is zip_button:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Existing Machine ZIP",
+                str(Path.home()),
+                "ZIP files (*.zip)",
+            )
+            if path:
+                return path, "zip"
+            return None, None
+        if clicked is folder_button:
+            path = QFileDialog.getExistingDirectory(
+                self,
+                "Import Existing Machine Folder",
+                str(Path.home()),
+            )
+            if path:
+                return path, "folder"
+        return None, None
+
+    def _import_existing_machine_entrypoint(self) -> None:
+        path, source_kind = self._choose_import_source()
+        if not path or not source_kind:
+            return
+        self._import_existing_machine_from_path(path, source_kind)
+
+    def _import_existing_machine_from_path(self, path: str, source_kind: str) -> None:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if source_kind == "zip":
+                profile = self.existing_machine_import_service.import_zip(path)
+            else:
+                profile = self.existing_machine_import_service.import_folder(path)
+        except ExistingMachineImportError as exc:
+            self._show_error("Import Existing Machine", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        file_map = profile.detected.get("file_map")
+        if not isinstance(file_map, dict):
+            file_map = dict(self.existing_machine_import_service.last_import_files)
+        normalized_file_map = {
+            str(file_path): str(content)
+            for file_path, content in file_map.items()
+            if str(file_path).strip()
+        }
+        if not normalized_file_map:
+            self._show_error("Import Existing Machine", "No readable files found in import source.")
+            return
+
+        self._load_imported_machine_profile(profile, normalized_file_map)
+        self.tabs.setCurrentWidget(self.files_tab)
+        self.statusBar().showMessage(f"Imported existing machine: {Path(path).name}", 3000)
+
+    def _load_imported_machine_profile(
+        self,
+        profile: ImportedMachineProfile,
+        file_map: dict[str, str],
+    ) -> None:
+        self.current_import_profile = profile
+        self.imported_file_map = dict(file_map)
+        ordered = sorted(self.imported_file_map.keys(), key=str.casefold)
+        root_file = profile.root_file
+        if root_file in ordered:
+            ordered.remove(root_file)
+            ordered.insert(0, root_file)
+        self.imported_file_order = ordered
+        self._showing_external_file = True
+
+        self.generated_file_list.blockSignals(True)
+        self.generated_file_list.clear()
+        for file_path in ordered:
+            self.generated_file_list.addItem(file_path)
+        self.generated_file_list.blockSignals(False)
+
+        if ordered:
+            self.generated_file_list.setCurrentRow(0)
+            self._show_selected_imported_file()
+        else:
+            self._set_files_tab_content(
+                content="",
+                label="No imported files.",
+                source="imported",
+                generated_name=None,
+            )
+
+        if hasattr(self, "machine_profile_name_edit"):
+            self.machine_profile_name_edit.setText(profile.name)
+        self._populate_import_review(profile)
+
+    @staticmethod
+    def _format_import_value(value: Any) -> str:
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value)
+        if isinstance(value, dict):
+            return ", ".join(f"{k}={v}" for k, v in value.items())
+        return str(value)
+
+    def _populate_import_review(self, profile: ImportedMachineProfile) -> None:
+        self.import_review_suggestions = list(profile.suggestions)
+        self.import_review_table.setRowCount(len(self.import_review_suggestions))
+
+        for row, suggestion in enumerate(self.import_review_suggestions):
+            apply_item = QTableWidgetItem("")
+            apply_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            apply_item.setCheckState(
+                Qt.CheckState.Checked if suggestion.auto_apply else Qt.CheckState.Unchecked
+            )
+            self.import_review_table.setItem(row, 0, apply_item)
+            self.import_review_table.setItem(row, 1, QTableWidgetItem(suggestion.field))
+            self.import_review_table.setItem(row, 2, QTableWidgetItem(self._format_import_value(suggestion.value)))
+            self.import_review_table.setItem(
+                row,
+                3,
+                QTableWidgetItem(f"{suggestion.confidence * 100:.0f}%"),
+            )
+            self.import_review_table.setItem(row, 4, QTableWidgetItem(suggestion.reason))
+            self.import_review_table.setItem(row, 5, QTableWidgetItem(suggestion.source_file))
+
+        warning_count = len(profile.analysis_warnings)
+        suggestion_count = len(profile.suggestions)
+        if warning_count > 0:
+            preview_warning = profile.analysis_warnings[0]
+            self.import_review_status_label.setText(
+                f"Loaded {suggestion_count} suggestion(s). {warning_count} warning(s). "
+                f"Example: {preview_warning}"
+            )
+            self.import_review_status_label.setStyleSheet(
+                "QLabel { background-color: #78350f; color: #ffffff; border: 1px solid #f59e0b; "
+                "border-radius: 4px; padding: 6px 8px; font-weight: 600; }"
+            )
+        else:
+            self.import_review_status_label.setText(
+                f"Loaded {suggestion_count} suggestion(s). Select rows to apply."
+            )
+            self.import_review_status_label.setStyleSheet(
+                "QLabel { background-color: #111827; color: #e5e7eb; border: 1px solid #374151; "
+                "border-radius: 4px; padding: 6px 8px; }"
+            )
+
+    def _select_high_confidence_import_suggestions(self) -> None:
+        if not self.import_review_suggestions:
+            return
+        for row, suggestion in enumerate(self.import_review_suggestions):
+            item = self.import_review_table.item(row, 0)
+            if item is None:
+                continue
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if suggestion.confidence >= self.existing_machine_import_service.high_confidence_threshold
+                else Qt.CheckState.Unchecked
+            )
+
+    def _selected_import_suggestions(self) -> list[ImportSuggestion]:
+        selected: list[ImportSuggestion] = []
+        for row, suggestion in enumerate(self.import_review_suggestions):
+            item = self.import_review_table.item(row, 0)
+            if item is None:
+                continue
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            selected.append(
+                ImportSuggestion(
+                    field=suggestion.field,
+                    value=suggestion.value,
+                    confidence=suggestion.confidence,
+                    reason=suggestion.reason,
+                    source_file=suggestion.source_file,
+                    auto_apply=True,
+                )
+            )
+        return selected
+
+    def _apply_selected_import_suggestions(self) -> None:
+        if self.current_import_profile is None:
+            self._show_error("Import Review", "No imported machine profile is loaded.")
+            return
+
+        selected = self._selected_import_suggestions()
+        if not selected:
+            self._show_error("Import Review", "Select at least one suggestion to apply.")
+            return
+
+        try:
+            base_project = self._build_project_from_ui()
+        except Exception:  # noqa: BLE001
+            if self.current_project is not None:
+                base_project = self.current_project
+            else:
+                self._show_error("Import Review", "Current UI project is invalid and cannot be updated.")
+                return
+
+        profile = self.current_import_profile.model_copy(deep=True)
+        profile.suggestions = selected
+
+        try:
+            updated_project = self.existing_machine_import_service.apply_suggestions(profile, base_project)
+        except Exception as exc:  # noqa: BLE001
+            self._show_error("Import Review", str(exc))
+            return
+
+        self._apply_project_to_ui(updated_project)
+        self._render_and_validate()
+        self.import_profile_applied_snapshot = updated_project.model_dump(mode="json")
+        self.statusBar().showMessage(f"Applied {len(selected)} import suggestion(s)", 3000)
+
+    def _refresh_saved_machine_profiles(self, select_name: str | None = None) -> None:
+        names = self.saved_machine_profile_service.list_names()
+        self.machine_profile_combo.blockSignals(True)
+        self.machine_profile_combo.clear()
+        self.machine_profile_combo.addItems(names)
+        self.machine_profile_combo.blockSignals(False)
+        target = (select_name or "").strip()
+        if target:
+            index = self.machine_profile_combo.findText(target)
+            if index >= 0:
+                self.machine_profile_combo.setCurrentIndex(index)
+        elif self.machine_profile_combo.count() > 0:
+            self.machine_profile_combo.setCurrentIndex(0)
+
+    def _save_current_machine_profile(self) -> None:
+        if self.current_import_profile is None:
+            self._show_error("Machine Profile", "Import a machine first before saving a profile.")
+            return
+        name = self.machine_profile_name_edit.text().strip() or self.current_import_profile.name
+        if not name:
+            self._show_error("Machine Profile", "Profile name is required.")
+            return
+
+        profile = self.current_import_profile.model_copy(deep=True)
+        profile.name = name
+        profile.suggestions = self._selected_import_suggestions() or profile.suggestions
+        profile.detected["file_map"] = dict(self.imported_file_map)
+        if self.import_profile_applied_snapshot:
+            profile.detected["applied_project_snapshot"] = dict(self.import_profile_applied_snapshot)
+
+        try:
+            self.saved_machine_profile_service.save(name, profile)
+        except Exception as exc:  # noqa: BLE001
+            self._show_error("Machine Profile", str(exc))
+            return
+
+        self._refresh_saved_machine_profiles(select_name=name)
+        self.statusBar().showMessage(f"Saved machine profile '{name}'", 3000)
+
+    def _load_selected_machine_profile(self) -> None:
+        name = self.machine_profile_combo.currentText().strip()
+        if not name:
+            self._show_error("Machine Profile", "Select a saved machine profile.")
+            return
+        profile = self.saved_machine_profile_service.load(name)
+        if profile is None:
+            self._show_error("Machine Profile", f"Profile '{name}' was not found.")
+            self._refresh_saved_machine_profiles()
+            return
+        file_map = profile.detected.get("file_map")
+        if not isinstance(file_map, dict) or not file_map:
+            self._show_error(
+                "Machine Profile",
+                f"Profile '{name}' does not contain an imported file map.",
+            )
+            return
+
+        normalized_file_map = {str(path): str(content) for path, content in file_map.items()}
+        self._load_imported_machine_profile(profile, normalized_file_map)
+
+        snapshot = profile.detected.get("applied_project_snapshot")
+        if isinstance(snapshot, dict):
+            self.import_profile_applied_snapshot = dict(snapshot)
+        else:
+            self.import_profile_applied_snapshot = {}
+        self.statusBar().showMessage(f"Loaded machine profile '{name}'", 3000)
+
+    def _delete_selected_machine_profile(self) -> None:
+        name = self.machine_profile_combo.currentText().strip()
+        if not name:
+            self._show_error("Machine Profile", "Select a saved machine profile to delete.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Machine Profile",
+            f"Delete saved machine profile '{name}'?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        deleted = self.saved_machine_profile_service.delete(name)
+        if not deleted:
+            self._show_error("Machine Profile", f"Profile '{name}' was not found.")
+            return
+        self._refresh_saved_machine_profiles()
+        self.statusBar().showMessage(f"Deleted machine profile '{name}'", 3000)
+
+    def _show_selected_imported_file(self) -> None:
+        item = self.generated_file_list.currentItem()
+        if item is None:
+            return
+        file_path = item.text().strip()
+        if not file_path:
+            return
+        content = self.imported_file_map.get(file_path)
+        if content is None:
+            return
+        self._set_files_tab_content(
+            content=content,
+            label=file_path,
+            source="imported",
+            generated_name=None,
+        )
 
     def _build_main_tab(self) -> QWidget:
         tab = QWidget(self)
@@ -919,10 +1788,6 @@ class MainWindow(QMainWindow):
 
         top_row = QHBoxLayout()
 
-        open_local_btn = QPushButton("Open Local .cfg", tab)
-        open_local_btn.clicked.connect(self._open_local_cfg_file)
-        top_row.addWidget(open_local_btn)
-
         show_generated_btn = QPushButton("Show Generated Files", tab)
         show_generated_btn.clicked.connect(self._show_selected_generated_file)
         top_row.addWidget(show_generated_btn)
@@ -943,6 +1808,29 @@ class MainWindow(QMainWindow):
         top_row.addWidget(self.preview_path_label, 1)
 
         layout.addLayout(top_row)
+
+        profile_row = QHBoxLayout()
+        self.machine_profile_name_edit = QLineEdit(tab)
+        self.machine_profile_name_edit.setPlaceholderText("Machine profile name")
+        profile_row.addWidget(self.machine_profile_name_edit, 1)
+
+        self.machine_profile_combo = QComboBox(tab)
+        self.machine_profile_combo.setMinimumWidth(220)
+        profile_row.addWidget(self.machine_profile_combo)
+
+        self.save_machine_profile_btn = QPushButton("Save Machine Profile", tab)
+        self.save_machine_profile_btn.clicked.connect(self._save_current_machine_profile)
+        profile_row.addWidget(self.save_machine_profile_btn)
+
+        self.load_machine_profile_btn = QPushButton("Load Machine Profile", tab)
+        self.load_machine_profile_btn.clicked.connect(self._load_selected_machine_profile)
+        profile_row.addWidget(self.load_machine_profile_btn)
+
+        self.delete_machine_profile_btn = QPushButton("Delete", tab)
+        self.delete_machine_profile_btn.clicked.connect(self._delete_selected_machine_profile)
+        profile_row.addWidget(self.delete_machine_profile_btn)
+
+        layout.addLayout(profile_row)
 
         self.cfg_tools_status_label = QLabel("", tab)
         self.cfg_tools_status_label.setWordWrap(True)
@@ -992,6 +1880,57 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         layout.addWidget(splitter, 1)
+
+        (
+            import_review_section,
+            self.import_review_section_toggle,
+            self.import_review_section_content,
+            import_review_layout,
+        ) = self._build_collapsible_section("Import Review", tab, expanded=True)
+
+        self.import_review_status_label = QLabel(
+            "No imported machine analysis loaded.",
+            self.import_review_section_content,
+        )
+        self.import_review_status_label.setWordWrap(True)
+        import_review_layout.addWidget(self.import_review_status_label)
+
+        self.import_review_table = QTableWidget(self.import_review_section_content)
+        self.import_review_table.setColumnCount(6)
+        self.import_review_table.setHorizontalHeaderLabels(
+            ["Apply", "Field", "Value", "Confidence", "Reason", "Source"]
+        )
+        self.import_review_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.import_review_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        self.import_review_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.import_review_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents
+        )
+        self.import_review_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.import_review_table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeToContents
+        )
+        self.import_review_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.import_review_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        import_review_layout.addWidget(self.import_review_table)
+
+        import_actions = QHBoxLayout()
+        self.import_apply_selected_btn = QPushButton("Apply Selected", self.import_review_section_content)
+        self.import_apply_selected_btn.clicked.connect(self._apply_selected_import_suggestions)
+        import_actions.addWidget(self.import_apply_selected_btn)
+
+        self.import_select_high_btn = QPushButton("Select High Confidence", self.import_review_section_content)
+        self.import_select_high_btn.clicked.connect(self._select_high_confidence_import_suggestions)
+        import_actions.addWidget(self.import_select_high_btn)
+        import_actions.addStretch(1)
+        import_review_layout.addLayout(import_actions)
+        layout.addWidget(import_review_section)
 
         (
             overrides_section,
@@ -1069,41 +2008,6 @@ class MainWindow(QMainWindow):
         validation_layout.addWidget(rerun_btn)
 
         layout.addWidget(validation_section)
-
-        export_group = QGroupBox("Export", tab)
-        export_layout = QVBoxLayout(export_group)
-        intro = QLabel(
-            "Export creates a Klipper config pack for manual upload or direct SSH deployment.",
-            export_group,
-        )
-        intro.setWordWrap(True)
-        export_layout.addWidget(intro)
-
-        button_row = QHBoxLayout()
-        self.export_folder_btn = QPushButton("Export Folder", export_group)
-        self.export_folder_btn.clicked.connect(self._export_folder)
-        button_row.addWidget(self.export_folder_btn)
-
-        self.export_zip_btn = QPushButton("Export ZIP", export_group)
-        self.export_zip_btn.clicked.connect(self._export_zip)
-        button_row.addWidget(self.export_zip_btn)
-
-        save_project_btn = QPushButton("Save Project", export_group)
-        save_project_btn.clicked.connect(self._save_project_to_file)
-        button_row.addWidget(save_project_btn)
-
-        load_project_btn = QPushButton("Load Project", export_group)
-        load_project_btn.clicked.connect(self._load_project_from_file)
-        button_row.addWidget(load_project_btn)
-
-        button_row.addStretch(1)
-        export_layout.addLayout(button_row)
-
-        self.export_status_label = QLabel("No export performed.", export_group)
-        self.export_status_label.setWordWrap(True)
-        export_layout.addWidget(self.export_status_label)
-
-        layout.addWidget(export_group)
         return tab
 
     def _build_collapsible_section(
@@ -1241,16 +2145,12 @@ class MainWindow(QMainWindow):
         discovery_form.addRow("Max hosts", self.scan_max_hosts_spin)
         discovery_layout.addLayout(discovery_form)
 
-        discovery_buttons = QHBoxLayout()
-        self.scan_network_btn = QPushButton("Scan for Printers", discovery_group)
-        self.scan_network_btn.clicked.connect(self._scan_for_printers)
-        discovery_buttons.addWidget(self.scan_network_btn)
-
-        self.use_scanned_btn = QPushButton("Use Selected Host", discovery_group)
-        self.use_scanned_btn.clicked.connect(self._use_selected_discovery_host)
-        discovery_buttons.addWidget(self.use_scanned_btn)
-        discovery_buttons.addStretch(1)
-        discovery_layout.addLayout(discovery_buttons)
+        discovery_hint = QLabel(
+            "Use Tools -> Printer Connection -> Scan for Printers / Use Selected Host.",
+            discovery_group,
+        )
+        discovery_hint.setWordWrap(True)
+        discovery_layout.addWidget(discovery_hint)
 
         self.discovery_results_table = QTableWidget(discovery_group)
         self.discovery_results_table.setColumnCount(4)
@@ -1293,22 +2193,12 @@ class MainWindow(QMainWindow):
         options_form.addRow("Restart command", self.ssh_restart_cmd_edit)
         layout.addWidget(options_group)
 
-        button_row = QHBoxLayout()
-
-        self.ssh_connect_btn = QPushButton("Connect", tab)
-        self.ssh_connect_btn.clicked.connect(self._connect_ssh_to_host)
-        button_row.addWidget(self.ssh_connect_btn)
-
-        fetch_btn = QPushButton("Open Remote File", tab)
-        fetch_btn.clicked.connect(self._fetch_remote_cfg_file)
-        button_row.addWidget(fetch_btn)
-
-        self.deploy_btn = QPushButton("Deploy Generated Pack", tab)
-        self.deploy_btn.clicked.connect(self._deploy_generated_pack)
-        button_row.addWidget(self.deploy_btn)
-
-        button_row.addStretch(1)
-        layout.addLayout(button_row)
+        action_hint = QLabel(
+            "Use Tools -> Printer Connection for Connect, Open Remote File, and Deploy Generated Pack.",
+            tab,
+        )
+        action_hint.setWordWrap(True)
+        layout.addWidget(action_hint)
 
         (
             ssh_log_section,
@@ -1952,6 +2842,15 @@ class MainWindow(QMainWindow):
         self._last_blocking_alert_snapshot = snapshot
 
     def _update_generated_files_view(self, pack: RenderedPack | None) -> None:
+        if pack is not None and "printer.cfg" in pack.files:
+            self._set_persistent_preview_source(
+                content=pack.files["printer.cfg"],
+                label="Generated: printer.cfg",
+                source_kind="generated",
+                generated_name="printer.cfg",
+                source_key="generated:printer.cfg",
+                update_last=False,
+            )
         if self._showing_external_file:
             return
 
@@ -1979,16 +2878,29 @@ class MainWindow(QMainWindow):
             and self.current_pack is not None
             and not self.current_report.has_blocking
         )
-        self.export_folder_btn.setEnabled(can_output)
-        self.export_zip_btn.setEnabled(can_output)
-        self.deploy_btn.setEnabled(can_output)
+        if hasattr(self, "export_folder_action"):
+            self.export_folder_action.setEnabled(can_output)
+        if hasattr(self, "export_zip_action"):
+            self.export_zip_action.setEnabled(can_output)
+        if hasattr(self, "tools_deploy_action"):
+            self.tools_deploy_action.setEnabled(can_output)
 
     def _on_generated_file_selected(self) -> None:
+        if self._showing_external_file and self.imported_file_map:
+            self._show_selected_imported_file()
+            return
         if self._showing_external_file:
             return
         self._show_selected_generated_file()
 
     def _show_selected_generated_file(self) -> None:
+        if self._showing_external_file:
+            self._showing_external_file = False
+            self.imported_file_order = []
+            self.generated_file_list.clear()
+            self._update_generated_files_view(self.current_pack)
+            return
+
         self._showing_external_file = False
         if self.current_pack is None:
             self._set_files_tab_content(
@@ -2059,6 +2971,13 @@ class MainWindow(QMainWindow):
         self.files_current_generated_name = generated_name
         self.file_preview.setPlainText(content)
         self.preview_path_label.setText(label)
+        self._set_persistent_preview_source(
+            content=content,
+            label=label,
+            source_kind=source,
+            generated_name=generated_name,
+            update_last=True,
+        )
         self._rebuild_cfg_form()
         if self._is_cfg_label(label, generated_name):
             self._run_current_cfg_validation(show_dialog=False)
@@ -2159,12 +3078,38 @@ class MainWindow(QMainWindow):
             return None
         content, source_label = context
 
-        report = self.firmware_tools_service.validate_cfg(content, source_label=source_label)
+        if (
+            self.files_current_source == "imported"
+            and self.current_import_profile is not None
+            and self.imported_file_map
+        ):
+            report = self.firmware_tools_service.validate_graph(
+                self.imported_file_map,
+                self.current_import_profile.root_file,
+            )
+            status_source_label = f"Imported graph ({self.current_import_profile.root_file})"
+        else:
+            report = self.firmware_tools_service.validate_cfg(
+                content,
+                source_label=source_label,
+                role="auto",
+            )
+            status_source_label = source_label
         self.current_cfg_report = report
-        self._update_cfg_tools_status(report, source_label=source_label)
+        self._update_cfg_tools_status(report, source_label=status_source_label)
+        preview_key = self._build_preview_source_key(
+            self.files_current_source,
+            self.files_current_label,
+            self.files_current_generated_name,
+        )
 
         blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
         warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        self._set_preview_validation_state(
+            preview_key,
+            blocking=blocking,
+            warnings=warnings,
+        )
         if blocking > 0:
             self.statusBar().showMessage(f"Firmware validation: {blocking} blocking issue(s)", 3500)
         elif warnings > 0:
@@ -2178,19 +3123,19 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "Firmware Validation",
-                    f"{source_label}: {blocking} blocking, {warnings} warning.\n\n{details}",
+                    f"{status_source_label}: {blocking} blocking, {warnings} warning.\n\n{details}",
                 )
             elif warnings > 0:
                 QMessageBox.warning(
                     self,
                     "Firmware Validation",
-                    f"{source_label}: warnings detected ({warnings}).\n\n{details}",
+                    f"{status_source_label}: warnings detected ({warnings}).\n\n{details}",
                 )
             else:
                 QMessageBox.information(
                     self,
                     "Firmware Validation",
-                    f"{source_label}: no issues detected.",
+                    f"{status_source_label}: no issues detected.",
                 )
         return report
 
@@ -2408,7 +3353,8 @@ class MainWindow(QMainWindow):
             self._show_error("Export Failed", str(exc))
             return
 
-        self.export_status_label.setText(f"Folder export complete: {directory}")
+        if hasattr(self, "export_status_label"):
+            self.export_status_label.setText(f"Folder export complete: {directory}")
         self.statusBar().showMessage("Exported folder", 2500)
 
     def _export_zip(self) -> None:
@@ -2435,7 +3381,8 @@ class MainWindow(QMainWindow):
             self._show_error("Export Failed", str(exc))
             return
 
-        self.export_status_label.setText(f"ZIP export complete: {zip_path}")
+        if hasattr(self, "export_status_label"):
+            self.export_status_label.setText(f"ZIP export complete: {zip_path}")
         self.statusBar().showMessage("Exported zip", 2500)
     def _save_project_to_file(self) -> None:
         try:
@@ -2627,7 +3574,10 @@ class MainWindow(QMainWindow):
         timeout = float(self.scan_timeout_spin.value())
         max_hosts = int(self.scan_max_hosts_spin.value())
 
-        self.scan_network_btn.setEnabled(False)
+        if hasattr(self, "scan_network_btn"):
+            self.scan_network_btn.setEnabled(False)
+        if hasattr(self, "tools_scan_printers_action"):
+            self.tools_scan_printers_action.setEnabled(False)
         self.statusBar().showMessage("Scanning network for printers...", 0)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -2642,7 +3592,10 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
-            self.scan_network_btn.setEnabled(True)
+            if hasattr(self, "scan_network_btn"):
+                self.scan_network_btn.setEnabled(True)
+            if hasattr(self, "tools_scan_printers_action"):
+                self.tools_scan_printers_action.setEnabled(True)
 
         self._populate_discovery_results(results)
         if results:
@@ -3054,6 +4007,13 @@ class MainWindow(QMainWindow):
         self.manage_file_editor.setPlainText(content)
         self.manage_current_remote_file = remote_path
         self.manage_current_file_label.setText(f"Editing: {remote_path}")
+        self._set_persistent_preview_source(
+            content=content,
+            label=remote_path,
+            source_kind="manage_remote",
+            source_key=f"manage_remote:{remote_path}",
+            update_last=True,
+        )
         self._append_manage_log(f"Opened {remote_path}.")
         self._set_device_connection_health(True, f"Opened {remote_path}.")
         self.statusBar().showMessage(f"Opened {remote_path}", 2500)
@@ -3095,6 +4055,13 @@ class MainWindow(QMainWindow):
 
         self.manage_current_remote_file = saved_path
         self.manage_current_file_label.setText(f"Editing: {saved_path}")
+        self._set_persistent_preview_source(
+            content=content,
+            label=saved_path,
+            source_kind="manage_remote",
+            source_key=f"manage_remote:{saved_path}",
+            update_last=True,
+        )
         self._append_manage_log(f"Saved {saved_path}.")
         self._set_device_connection_health(True, f"Saved {saved_path}.")
         self.statusBar().showMessage("Remote file saved", 2500)
@@ -3117,6 +4084,11 @@ class MainWindow(QMainWindow):
         report = self.firmware_tools_service.validate_cfg(content, source_label=remote_path)
         blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
         warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        self._set_preview_validation_state(
+            f"manage_remote:{remote_path}",
+            blocking=blocking,
+            warnings=warnings,
+        )
         self._append_manage_log(
             f"Validation for {remote_path}: blocking={blocking}, warnings={warnings}."
         )
@@ -3147,6 +4119,13 @@ class MainWindow(QMainWindow):
         updated, changes = self.firmware_tools_service.refactor_cfg(content)
         if updated != content:
             self.manage_file_editor.setPlainText(updated)
+            self._set_persistent_preview_source(
+                content=updated,
+                label=remote_path,
+                source_kind="manage_remote",
+                source_key=f"manage_remote:{remote_path}",
+                update_last=True,
+            )
             self._append_manage_log(f"Refactored {remote_path}: {changes} change(s).")
             self.statusBar().showMessage(f"Refactored remote file ({changes} change(s))", 3000)
         else:
@@ -3579,6 +4558,13 @@ class MainWindow(QMainWindow):
 
         self.modify_editor.setPlainText(contents)
         self.modify_current_remote_file = remote_path
+        self._set_persistent_preview_source(
+            content=contents,
+            label=remote_path,
+            source_kind="modify_remote",
+            source_key=f"modify_remote:{remote_path}",
+            update_last=True,
+        )
         self._set_device_connection_health(True, f"Opened {remote_path}.")
         self._set_modify_status(f"Loaded {remote_path}", severity="ok")
         self._append_modify_log(f"Loaded {remote_path}.")
@@ -3606,6 +4592,11 @@ class MainWindow(QMainWindow):
         report = self.firmware_tools_service.validate_cfg(content, source_label=remote_path)
         blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
         warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        self._set_preview_validation_state(
+            f"modify_remote:{remote_path}",
+            blocking=blocking,
+            warnings=warnings,
+        )
         self._append_modify_log(
             f"Validation for {remote_path}: blocking={blocking}, warnings={warnings}."
         )
@@ -3654,6 +4645,13 @@ class MainWindow(QMainWindow):
         updated, changes = self.firmware_tools_service.refactor_cfg(content)
         if updated != content:
             self.modify_editor.setPlainText(updated)
+            self._set_persistent_preview_source(
+                content=updated,
+                label=remote_path,
+                source_kind="modify_remote",
+                source_key=f"modify_remote:{remote_path}",
+                update_last=True,
+            )
             self._append_modify_log(f"Refactored {remote_path}: {changes} change(s).")
             self._set_modify_status(
                 f"Refactored {remote_path}: {changes} change(s).",
@@ -3708,6 +4706,13 @@ class MainWindow(QMainWindow):
 
         self.modify_current_remote_file = saved_path
         self.modify_remote_cfg_path_edit.setText(saved_path)
+        self._set_persistent_preview_source(
+            content=content,
+            label=saved_path,
+            source_kind="modify_remote",
+            source_key=f"modify_remote:{saved_path}",
+            update_last=True,
+        )
         self._append_modify_log(f"Backup created: {backup_path}")
         self._append_modify_log(f"Uploaded file: {saved_path}")
         self._set_modify_status(
@@ -3773,6 +4778,8 @@ class MainWindow(QMainWindow):
             ok, output = service.test_connection(**params)
         except SSHDeployError as exc:
             self._set_device_connection_health(False, str(exc))
+            self.preview_connected_printer_name = None
+            self.preview_connected_host = None
             self._set_manage_connected_printer_display(None, None, connected=False)
             self._set_modify_connected_printer_display(None, None, connected=False)
             self._append_ssh_log(str(exc))
@@ -3784,6 +4791,8 @@ class MainWindow(QMainWindow):
         if ok:
             self._set_device_connection_health(True, str(output))
             printer_name = self._resolve_connected_printer_name(str(params["host"]))
+            self.preview_connected_printer_name = printer_name
+            self.preview_connected_host = str(params["host"])
             self._set_manage_connected_printer_display(
                 printer_name=printer_name,
                 host=str(params["host"]),
@@ -3805,6 +4814,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Connected to {printer_name}", 2500)
             return
         self._set_device_connection_health(False, str(output))
+        self.preview_connected_printer_name = None
+        self.preview_connected_host = None
         self._set_manage_connected_printer_display(None, None, connected=False)
         self._set_modify_connected_printer_display(None, None, connected=False)
         self._append_ssh_log(f"Connection failed: {output}")
@@ -3918,6 +4929,10 @@ class MainWindow(QMainWindow):
         if profile is None:
             return board_id
         return f"{profile.label} ({board_id})"
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001
+        self._persist_preview_settings()
+        super().closeEvent(event)
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)

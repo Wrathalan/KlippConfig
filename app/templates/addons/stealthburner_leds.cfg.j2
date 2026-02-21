@@ -1,0 +1,13 @@
+[neopixel sb_leds]
+pin: {{ override("addon.stealthburner_leds.pin", pins.part_cooling_fan) }}
+chain_count: {{ override("addon.stealthburner_leds.chain_count", 3) }}
+color_order: {{ override("addon.stealthburner_leds.color_order", "GRBW") }}
+initial_RED: {{ override("addon.stealthburner_leds.initial_red", 1.0) }}
+initial_GREEN: {{ override("addon.stealthburner_leds.initial_green", 0.0) }}
+initial_BLUE: {{ override("addon.stealthburner_leds.initial_blue", 1.0) }}
+initial_WHITE: {{ override("addon.stealthburner_leds.initial_white", 0.0) }}
+
+[gcode_macro STATUS_READY]
+description: StealthBurner LED status scaffold
+gcode:
+  RESPOND MSG="StealthBurner LED STATUS_READY scaffold"

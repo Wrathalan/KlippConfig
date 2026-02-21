@@ -406,6 +406,14 @@ TOOLHEAD_BOARD_REGISTRY: dict[str, BoardProfile] = {
 
 
 BUILTIN_ADDON_REGISTRY: dict[str, AddonProfile] = {
+    "afc": AddonProfile(
+        id="afc",
+        label="AFC",
+        template="addons/afc.cfg.j2",
+        description="Automated Filament Changer baseline integration scaffold.",
+        multi_material=False,
+        recommends_toolhead=True,
+    ),
     "ams_lite": AddonProfile(
         id="ams_lite",
         label="AMS Lite",
@@ -443,6 +451,30 @@ BUILTIN_ADDON_REGISTRY: dict[str, AddonProfile] = {
         label="Filament Buffer",
         template="addons/filament_buffer.cfg.j2",
         description="Simple filament buffer/coupler configuration helper.",
+        multi_material=False,
+        recommends_toolhead=False,
+    ),
+    "kamp": AddonProfile(
+        id="kamp",
+        label="KAMP",
+        template="addons/kamp.cfg.j2",
+        description="Klipper Adaptive Meshing and Purging baseline include scaffold.",
+        multi_material=False,
+        recommends_toolhead=False,
+    ),
+    "stealthburner_leds": AddonProfile(
+        id="stealthburner_leds",
+        label="StealthBurner LEDs",
+        template="addons/stealthburner_leds.cfg.j2",
+        description="StealthBurner status LED macro/include scaffold.",
+        multi_material=False,
+        recommends_toolhead=False,
+    ),
+    "timelapse": AddonProfile(
+        id="timelapse",
+        label="Timelapse",
+        template="addons/timelapse.cfg.j2",
+        description="Timelapse macro include scaffold.",
         multi_material=False,
         recommends_toolhead=False,
     ),

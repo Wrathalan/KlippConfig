@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -169,3 +170,29 @@ class ValidationReport(BaseModel):
 class RenderedPack(BaseModel):
     files: OrderedDict[str, str]
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConfigFileRole(str, Enum):
+    ROOT = "root"
+    INCLUDE_FRAGMENT = "include_fragment"
+    MACRO_PACK = "macro_pack"
+    MCU_MAP = "mcu_map"
+
+
+class ImportSuggestion(BaseModel):
+    field: str
+    value: Any
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+    source_file: str
+    auto_apply: bool = False
+
+
+class ImportedMachineProfile(BaseModel):
+    name: str
+    root_file: str
+    source_kind: Literal["zip", "folder"]
+    detected: dict[str, Any] = Field(default_factory=dict)
+    suggestions: list[ImportSuggestion] = Field(default_factory=list)
+    include_graph: dict[str, list[str]] = Field(default_factory=dict)
+    analysis_warnings: list[str] = Field(default_factory=list)
