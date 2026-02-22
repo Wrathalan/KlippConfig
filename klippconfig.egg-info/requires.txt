@@ -1,0 +1,9 @@
+PySide6>=6.8.0
+pydantic>=2.10.0
+jsonschema>=4.23.0
+Jinja2>=3.1.4
+paramiko>=3.5.0
+
+[dev]
+pytest>=8.3.0
+pytest-qt>=4.4.0
