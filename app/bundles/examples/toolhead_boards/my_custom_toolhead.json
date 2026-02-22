@@ -2,6 +2,7 @@
   "id": "my_custom_toolhead",
   "label": "My Custom Toolhead",
   "mcu": "rp2040",
+  "transport": "can",
   "serial_hint": "canbus_uuid: replace-with-uuid",
   "pins": {
     "extruder_step": "toolhead:EXT_STEP",

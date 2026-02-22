@@ -1,0 +1,49 @@
+{
+  "id": "btt_kraken",
+  "label": "BTT Kraken (Voron upstream)",
+  "mcu": "stm32h723xx",
+  "serial_hint": "/dev/serial/by-id/{REPLACE WITH YOUR SERIAL}",
+  "pins": {
+    "stepper_x_step": "PC14",
+    "stepper_x_dir": "!PC13",
+    "stepper_x_enable": "!PE6",
+    "stepper_y_step": "PE5",
+    "stepper_y_dir": "!PE4",
+    "stepper_y_enable": "!PE3",
+    "stepper_z_step": "PG9",
+    "stepper_z_dir": "!PG10",
+    "stepper_z_enable": "!PG13",
+    "extruder_step": "PE2",
+    "extruder_dir": "PE1",
+    "extruder_enable": "!PE0",
+    "heater_hotend": "PF6",
+    "temp_hotend": "PB1",
+    "heater_bed": "PF7",
+    "temp_bed": "PB0",
+    "probe": "~!PD11",
+    "part_cooling_fan": "PA0",
+    "toolhead_fan": "PA1"
+  },
+  "layout": {
+    "Stepper Drivers": [
+      "X",
+      "Y",
+      "Z0",
+      "Z1",
+      "Z2",
+      "Z3",
+      "E0"
+    ],
+    "Thermals": [
+      "HE0",
+      "BED",
+      "TH0",
+      "THB"
+    ],
+    "Fans and Probe": [
+      "FAN0",
+      "FAN1",
+      "PROBE"
+    ]
+  }
+}

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-02-22
+
+### Summary
+Usability and catalog refresh release with expanded Voron 2.4 coverage and streamlined project distribution boundaries.
+
+### Highlights
+- Added upstream-ingested Voron 2.4 preset coverage including the new 250 profile and refreshed board mappings.
+- Improved configuration workflow UX with vendor/preset defaults, probe/toolhead behavior updates, and preview refinements.
+- Added root dependency bootstrap script (`install_dependencies.ps1`) and moved non-runtime release automation/assets to a private sidecar path.
+
 ## [0.1.2.1] - 2026-02-21
 
 ### Summary

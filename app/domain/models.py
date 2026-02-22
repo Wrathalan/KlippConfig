@@ -42,6 +42,7 @@ class BoardProfile(BaseModel):
     serial_hint: str
     pins: dict[str, str]
     layout: dict[str, list[str]] = Field(default_factory=dict)
+    transport: Literal["usb", "can"] | None = None
 
 
 class AddonProfile(BaseModel):

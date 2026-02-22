@@ -48,6 +48,7 @@ Later roots override earlier ones by matching `id`.
   "id": "my_custom_toolhead",
   "label": "My Custom Toolhead",
   "mcu": "rp2040",
+  "transport": "can",
   "serial_hint": "canbus_uuid: replace-with-uuid",
   "pins": {
     "extruder_step": "toolhead:EXT_STEP",
@@ -61,6 +62,11 @@ Later roots override earlier ones by matching `id`.
   }
 }
 ```
+
+`transport` is optional and can be `can` or `usb`.
+
+- `can`: UI shows it in the CAN toolhead board list and validates `canbus_uuid`.
+- `usb`: UI shows it in the USB toolhead board list and renders `serial:` in `toolhead.cfg` using `serial_hint`.
 
 ## Add-on bundle JSON
 

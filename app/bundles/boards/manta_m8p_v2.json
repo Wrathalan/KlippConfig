@@ -1,0 +1,49 @@
+{
+  "id": "manta_m8p_v2",
+  "label": "BTT Manta M8P v2.0 (Voron upstream)",
+  "mcu": "stm32h723xx",
+  "serial_hint": "/dev/serial/by-id/YOU_DIDNT_CHANGE_ME_YET",
+  "pins": {
+    "stepper_x_step": "PE6",
+    "stepper_x_dir": "PE5",
+    "stepper_x_enable": "!PC14",
+    "stepper_y_step": "PE2",
+    "stepper_y_dir": "PE1",
+    "stepper_y_enable": "!PE4",
+    "stepper_z_step": "PB8",
+    "stepper_z_dir": "PB7",
+    "stepper_z_enable": "!PE0",
+    "extruder_step": "PC7",
+    "extruder_dir": "PC8",
+    "extruder_enable": "!PD2",
+    "heater_hotend": "PA0",
+    "temp_hotend": "PB0",
+    "heater_bed": "PA1",
+    "temp_bed": "PB1",
+    "probe": "PF1",
+    "part_cooling_fan": "PF7",
+    "toolhead_fan": "PF9"
+  },
+  "layout": {
+    "Stepper Drivers": [
+      "X",
+      "Y",
+      "Z0",
+      "Z1",
+      "Z2",
+      "Z3",
+      "E0"
+    ],
+    "Thermals": [
+      "HE0",
+      "BED",
+      "TH0",
+      "THB"
+    ],
+    "Fans and Probe": [
+      "FAN0",
+      "FAN1",
+      "PROBE"
+    ]
+  }
+}

@@ -12,3 +12,10 @@ dist/
 *.zip
 *.log
 
+# Keep non-runtime/release assets private and out of this repo
+release/
+scripts/
+app/services/release_versioning.py
+app/services/discord_webhook.py
+tests/test_release_versioning.py
+tests/test_discord_webhook.py

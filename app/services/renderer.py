@@ -11,6 +11,7 @@ from app.services.board_registry import (
     get_addon_profile,
     get_board_profile,
     get_toolhead_board_profile,
+    toolhead_board_transport,
 )
 from app.services.paths import bundle_template_dirs, templates_dir as default_templates_dir
 
@@ -88,6 +89,11 @@ class ConfigRenderService:
             if project.toolhead.enabled and project.toolhead.board
             else None
         )
+        toolhead_transport = (
+            toolhead_board_transport(project.toolhead.board)
+            if project.toolhead.enabled and project.toolhead.board
+            else None
+        )
         pins = dict(FALLBACK_PINS)
         if board_profile:
             pins.update(board_profile.pins)
@@ -109,6 +115,7 @@ class ConfigRenderService:
             "preset": preset,
             "board_profile": board_profile,
             "toolhead_profile": toolhead_profile,
+            "toolhead_transport": toolhead_transport,
             "pins": pins,
             "motion": {
                 "max_velocity": override("motion.max_velocity", preset.defaults.max_velocity),

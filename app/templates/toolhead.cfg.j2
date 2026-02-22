@@ -1,6 +1,10 @@
 {% if toolhead_profile %}
 [mcu toolhead]
+{% if toolhead_transport == "usb" %}
+serial: {{ override("toolhead.serial", toolhead_profile.serial_hint or "/dev/serial/by-id/usb-Toolhead_Board") }}
+{% else %}
 canbus_uuid: {{ override("toolhead.canbus_uuid", project.toolhead.canbus_uuid or "replace-with-canbus-uuid") }}
+{% endif %}
 
 [temperature_sensor toolhead_mcu]
 sensor_type: temperature_mcu
@@ -8,4 +12,3 @@ sensor_mcu: toolhead
 min_temp: 0
 max_temp: 100
 {% endif %}
-

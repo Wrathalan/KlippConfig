@@ -4,11 +4,14 @@ from app.domain.models import AddonProfile, BoardProfile
 from app.services.config_bundles import BundleCatalogService
 
 
-def _toolhead_profile(label: str, mcu: str) -> BoardProfile:
+def _toolhead_profile(label: str, mcu: str, *, transport: str = "can") -> BoardProfile:
+    serial_hint = "canbus_uuid: replace-with-uuid"
+    if transport == "usb":
+        serial_hint = "/dev/serial/by-id/usb-Toolhead_Board"
     return BoardProfile(
         label=label,
         mcu=mcu,
-        serial_hint="canbus_uuid: replace-with-uuid",
+        serial_hint=serial_hint,
         pins={
             "extruder_step": "toolhead:EXT_STEP",
             "extruder_dir": "toolhead:EXT_DIR",
@@ -25,6 +28,7 @@ def _toolhead_profile(label: str, mcu: str) -> BoardProfile:
             "Sensors": ["TH0", "PROBE", "FS0"],
             "Fans and IO": ["FAN0", "FAN1", "RGB", "GPIO"],
         },
+        transport="can" if transport != "usb" else "usb",
     )
 
 
@@ -483,6 +487,10 @@ BUILTIN_ADDON_REGISTRY: dict[str, AddonProfile] = {
 _bundle_catalog = BundleCatalogService()
 
 
+def refresh_bundle_catalog() -> None:
+    _bundle_catalog.reload()
+
+
 def _main_board_registry() -> dict[str, BoardProfile]:
     merged = dict(BOARD_REGISTRY)
     merged.update(_bundle_catalog.load_main_board_profiles())
@@ -515,6 +523,30 @@ def get_toolhead_board_profile(board_id: str) -> BoardProfile | None:
 
 def list_toolhead_boards() -> list[str]:
     return sorted(_toolhead_board_registry().keys())
+
+
+def toolhead_board_transport(board_id: str) -> str:
+    profile = get_toolhead_board_profile(board_id)
+    if profile is None:
+        return "can"
+
+    if profile.transport in {"can", "usb"}:
+        return profile.transport
+
+    hint = (profile.serial_hint or "").strip().lower()
+    if "canbus_uuid" in hint:
+        return "can"
+    if "/dev/serial" in hint or "usb" in hint or hint.startswith("serial:"):
+        return "usb"
+    return "can"
+
+
+def list_can_toolhead_boards() -> list[str]:
+    return sorted(board_id for board_id in list_toolhead_boards() if toolhead_board_transport(board_id) == "can")
+
+
+def list_usb_toolhead_boards() -> list[str]:
+    return sorted(board_id for board_id in list_toolhead_boards() if toolhead_board_transport(board_id) == "usb")
 
 
 def get_addon_profile(addon_id: str) -> AddonProfile | None:

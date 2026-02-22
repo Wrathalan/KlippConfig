@@ -1,0 +1,49 @@
+{
+  "id": "fysetc_spider_v2",
+  "label": "FYSETC Spider (Voron upstream)",
+  "mcu": "stm32f446xx",
+  "serial_hint": "/dev/serial/by-id/usb-Klipper_stm32f446xx_000000000000000000000000-if00",
+  "pins": {
+    "stepper_x_step": "PE11",
+    "stepper_x_dir": "PE10",
+    "stepper_x_enable": "!PE9",
+    "stepper_y_step": "PD8",
+    "stepper_y_dir": "PB12",
+    "stepper_y_enable": "!PD9",
+    "stepper_z_step": "PD14",
+    "stepper_z_dir": "PD13",
+    "stepper_z_enable": "!PD15",
+    "extruder_step": "PD5",
+    "extruder_dir": "PD6",
+    "extruder_enable": "!PD4",
+    "heater_hotend": "PB15",
+    "temp_hotend": "PC0",
+    "heater_bed": "PB4",
+    "temp_bed": "PC3",
+    "probe": "^PA3",
+    "part_cooling_fan": "PB1",
+    "toolhead_fan": "PB0"
+  },
+  "layout": {
+    "Stepper Drivers": [
+      "X",
+      "Y",
+      "Z0",
+      "Z1",
+      "Z2",
+      "Z3",
+      "E0"
+    ],
+    "Thermals": [
+      "HE0",
+      "BED",
+      "TH0",
+      "THB"
+    ],
+    "Fans and Probe": [
+      "FAN0",
+      "FAN1",
+      "PROBE"
+    ]
+  }
+}

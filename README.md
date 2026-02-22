@@ -18,7 +18,7 @@ It generates full Klipper config packs from curated Voron presets.
 - `Help -> About KlippConfig` menu entry in the command bar
 - Existing Machine Import from local ZIP/folder with auto-detected mappings and review/apply suggestions
 - Guided wizard for board, toolhead, dimensions, and core hardware choices
-- Optional CAN toolhead board selection and `toolhead.cfg` generation
+- Separate USB/CAN toolhead board selection and `toolhead.cfg` generation (catagorization is broken)
 - Includes LDO Nitehawk toolhead board options
 - Expanded mainboard catalog with board pin aliases and board layout output
 - Config bundle system for drop-in board/toolhead/add-on support (`%APPDATA%\KlippConfig\bundles`)
@@ -34,7 +34,7 @@ It generates full Klipper config packs from curated Voron presets.
 - Open existing `.cfg` files directly in-app
 - Footer device-health icon (red/green) reflects current SSH connection health
 - Live SSH deploy to Klipper hosts (connect, upload, optional restart)
-- `Tools -> Printer Connection` menu for connect/open remote/deploy/discovery actions
+- `Tools -> Printer Connection` menu for connect/open remote/explore config/deploy/discovery actions
 - Saved SSH connection profiles (named reconnect presets)
 - Saved machine import profiles for quick reopen and re-apply
 - SSH and Manage Printer console logs are collapsible and collapsed by default
@@ -43,6 +43,17 @@ It generates full Klipper config packs from curated Voron presets.
 - `Manage Printer` tab for direct remote file editing, backups, and restore operations
 - Embedded printer control window (web view) from `Manage Printer` for live manual controls
 - LAN Only
+
+## Dependencies (Unpackaged Run)
+
+Install these before running the app from source:
+
+- Python 3.11+
+- `PySide6>=6.8.0`
+- `pydantic>=2.10.0`
+- `jsonschema>=4.23.0`
+- `Jinja2>=3.1.4`
+- `paramiko>=3.5.0`
 
 ## Quick Start
 
@@ -53,13 +64,6 @@ pip install -e .[dev]
 pythonw -m app.main
 ```
 
-Alternative launcher:
-
-```powershell
-.\scripts\run_klippconfig.ps1
-```
-
-`run_klippconfig.ps1` always rebuilds `dist\KlippConfig.exe` first, then launches the EXE.
 
 
 ## Tests
@@ -67,7 +71,6 @@ Alternative launcher:
 ```powershell
 pytest
 ```
-
 
 ## SSH Tab
 
@@ -79,8 +82,9 @@ pytest
 6. Set `Connection name` and keep `Save on successful connect` enabled to auto-save reconnect profiles.
 7. Use `Saved` `Load/Save/Delete` controls for quick reconnect.
 8. Use `Tools -> Printer Connection -> Open Remote File` to pull a remote cfg into `Files`.
-9. Use `Tools -> Printer Connection -> Deploy Generated Pack` to upload the current validated pack.
-10. Optional: enable restart and provide the restart command.
+9. Use `Tools -> Printer Connection -> Explore Config Directory` (or the SSH-tab button) to open the connected printer's config directory in `Manage Printer`.
+10. Use `Tools -> Printer Connection -> Deploy Generated Pack` to upload the current validated pack.
+11. Optional: enable restart and provide the restart command.
 
 ## Main Tab
 
@@ -153,11 +157,10 @@ Reference examples and format docs:
 3. Shows the creator icon from `assets\creator.ico`.
 4. Includes the Discord community link: https://discord.gg/4CthQzS7Qy
 
-
 ## Windows Build
 
 ```powershell
-.\scripts\build_windows.ps1
+& "$env:APPDATA\KlippConfig\private-sidecar\scripts\build_windows.ps1"
 ```
 
 Build output:
@@ -165,4 +168,3 @@ Build output:
 - `dist\KlippConfig.exe` (self-contained, no console window)
 - Desktop shortcut `KlippConfig.lnk` (created by the build script)
 - Optional installer in `dist\installer` when Inno Setup (`iscc`) is on `PATH`
-

@@ -1,13 +1,13 @@
 {
-  "id": "voron_2_4_350",
-  "name": "Voron 2.4 350",
+  "id": "voron_2_4_250",
+  "name": "Voron 2.4 250",
   "family": "voron",
   "kinematics": "corexy",
   "version": 1,
   "build_volume": {
-    "x": 350,
-    "y": 350,
-    "z": 310
+    "x": 250,
+    "y": 250,
+    "z": 210
   },
   "supported_boards": [
     "btt_octopus_1_1",

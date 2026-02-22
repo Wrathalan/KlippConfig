@@ -1,0 +1,49 @@
+{
+  "id": "btt_skr_1_3",
+  "label": "BTT SKR 1.3 (Voron upstream)",
+  "mcu": "lpc1768",
+  "serial_hint": "/dev/serial/by-id/usb-Klipper_lpc1768_00000-if00",
+  "pins": {
+    "stepper_x_step": "P2.2",
+    "stepper_x_dir": "!P2.6",
+    "stepper_x_enable": "!P2.1",
+    "stepper_y_step": "P0.19",
+    "stepper_y_dir": "!P0.20",
+    "stepper_y_enable": "!P2.8",
+    "stepper_z_step": "z:P2.2",
+    "stepper_z_dir": "!z:P2.6",
+    "stepper_z_enable": "!z:P2.1",
+    "extruder_step": "P2.13",
+    "extruder_dir": "P0.11",
+    "extruder_enable": "!P2.12",
+    "heater_hotend": "P2.7",
+    "temp_hotend": "P0.24",
+    "heater_bed": "z:P2.3",
+    "temp_bed": "z:P0.23",
+    "probe": "z:P1.24",
+    "part_cooling_fan": "P2.3",
+    "toolhead_fan": "P2.4"
+  },
+  "layout": {
+    "Stepper Drivers": [
+      "X",
+      "Y",
+      "Z0",
+      "Z1",
+      "Z2",
+      "Z3",
+      "E0"
+    ],
+    "Thermals": [
+      "HE0",
+      "BED",
+      "TH0",
+      "THB"
+    ],
+    "Fans and Probe": [
+      "FAN0",
+      "FAN1",
+      "PROBE"
+    ]
+  }
+}

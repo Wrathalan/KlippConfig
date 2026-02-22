@@ -147,3 +147,54 @@ def test_custom_addon_bundle_renders_using_bundle_template(monkeypatch, tmp_path
     pack = renderer.render(project, preset)
     assert "addons.cfg" in pack.files
     assert "CHAMBER_HEATER_BUNDLE" in pack.files["addons.cfg"]
+
+
+def test_usb_toolhead_bundle_renders_serial_and_skips_can_uuid_requirement(
+    monkeypatch, tmp_path
+) -> None:
+    bundle_root = tmp_path / "bundles"
+    _write_json(
+        bundle_root / "toolhead_boards" / "usb_toolhead.json",
+        {
+            "id": "usb_toolhead",
+            "label": "USB Toolhead",
+            "mcu": "rp2040",
+            "transport": "usb",
+            "serial_hint": "/dev/serial/by-id/usb-USB_Toolhead",
+            "pins": {"extruder_step": "toolhead:EXT_STEP"},
+        },
+    )
+
+    monkeypatch.setenv("KLIPPCONFIG_BUNDLE_DIRS", str(bundle_root))
+    monkeypatch.setattr(board_registry, "_bundle_catalog", BundleCatalogService([bundle_root]))
+
+    catalog = PresetCatalogService()
+    validator = ValidationService()
+    renderer = ConfigRenderService()
+    preset = catalog.load_preset("voron_2_4_300")
+
+    payload = _base_project_payload(
+        preset.id,
+        preset.supported_boards[0],
+        preset.build_volume.x,
+        preset.build_volume.y,
+        preset.build_volume.z,
+    )
+    payload["toolhead"] = {
+        "enabled": True,
+        "board": "usb_toolhead",
+        "canbus_uuid": None,
+    }
+    project = ProjectConfig.model_validate(payload)
+
+    assert board_registry.toolhead_board_transport("usb_toolhead") == "usb"
+    assert "usb_toolhead" in board_registry.list_usb_toolhead_boards()
+    assert "usb_toolhead" not in board_registry.list_can_toolhead_boards()
+
+    report = validator.validate_project(project, preset)
+    assert not report.has_blocking
+
+    pack = renderer.render(project, preset)
+    assert "toolhead.cfg" in pack.files
+    assert "serial: /dev/serial/by-id/usb-USB_Toolhead" in pack.files["toolhead.cfg"]
+    assert "canbus_uuid:" not in pack.files["toolhead.cfg"]

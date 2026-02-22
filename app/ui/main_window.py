@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 import posixpath
 import re
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -59,6 +61,8 @@ from app.services.board_registry import (
     list_addons,
     list_main_boards,
     list_toolhead_boards,
+    refresh_bundle_catalog,
+    toolhead_board_transport,
 )
 from app.services.exporter import ExportService
 from app.services.existing_machine_import import (
@@ -66,7 +70,9 @@ from app.services.existing_machine_import import (
     ExistingMachineImportService,
 )
 from app.services.firmware_tools import FirmwareToolsService
+from app.services.paths import bundles_dir as default_bundles_dir
 from app.services.paths import creator_icon_path
+from app.services.paths import user_bundles_dir as default_user_bundles_dir
 from app.services.printer_discovery import (
     DiscoveredPrinter,
     PrinterDiscoveryError,
@@ -164,6 +170,7 @@ class MainWindow(QMainWindow):
         "filament_ops": "Filament Ops",
     }
 
+    DEFAULT_VORON_PRESET_ID = "voron_2_4_350"
     DEFAULT_PROBE_TYPES = ["tap", "inductive", "bltouch", "klicky", "euclid"]
     UI_SCALE_OPTIONS: tuple[tuple[UIScaleMode, str], ...] = (
         ("auto", "Auto"),
@@ -905,20 +912,32 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         tools_menu = self.menuBar().addMenu("&Tools")
-        render_action = QAction("Render + Validate", self)
-        render_action.triggered.connect(self._render_and_validate)
-        tools_menu.addAction(render_action)
+        compile_action = QAction("Compile", self)
+        compile_action.triggered.connect(self._render_and_validate)
+        tools_menu.addAction(compile_action)
+
+        self.tools_guided_component_setup_action = QAction("Guided Component Setup...", self)
+        self.tools_guided_component_setup_action.triggered.connect(
+            self._open_guided_component_setup
+        )
+        tools_menu.addAction(self.tools_guided_component_setup_action)
         tools_menu.addSeparator()
 
         printer_connection_menu = tools_menu.addMenu("Printer Connection")
 
-        self.tools_connect_action = QAction("Connect", self)
-        self.tools_connect_action.triggered.connect(self._connect_ssh_to_host)
-        printer_connection_menu.addAction(self.tools_connect_action)
+        self.tools_connect_menu = printer_connection_menu.addMenu("Connect")
+        self.tools_connect_menu.aboutToShow.connect(self._refresh_tools_connect_menu)
+        self._refresh_tools_connect_menu()
 
         self.tools_open_remote_action = QAction("Open Remote File", self)
         self.tools_open_remote_action.triggered.connect(self._fetch_remote_cfg_file)
         printer_connection_menu.addAction(self.tools_open_remote_action)
+
+        self.tools_explore_config_action = QAction("Explore Config Directory", self)
+        self.tools_explore_config_action.triggered.connect(
+            self._explore_connected_config_directory
+        )
+        printer_connection_menu.addAction(self.tools_explore_config_action)
 
         self.tools_deploy_action = QAction("Deploy Generated Pack", self)
         self.tools_deploy_action.triggered.connect(self._deploy_generated_pack)
@@ -990,6 +1009,383 @@ class MainWindow(QMainWindow):
 
     def _go_to_ssh_tab(self) -> None:
         self.tabs.setCurrentWidget(self.live_deploy_tab)
+
+    def _guided_prompt_text(
+        self,
+        title: str,
+        prompt: str,
+        default_value: str = "",
+    ) -> tuple[bool, str]:
+        value, ok = QInputDialog.getText(self, title, prompt, text=default_value)
+        return ok, value
+
+    def _guided_prompt_choice(
+        self,
+        title: str,
+        prompt: str,
+        options: list[str],
+        *,
+        default_index: int = 0,
+    ) -> tuple[bool, str]:
+        if not options:
+            return False, ""
+        if default_index < 0 or default_index >= len(options):
+            default_index = 0
+        selected, ok = QInputDialog.getItem(
+            self,
+            title,
+            prompt,
+            options,
+            default_index,
+            False,
+        )
+        return ok, selected
+
+    @staticmethod
+    def _slugify_component_id(raw_value: str) -> str:
+        value = raw_value.strip().lower()
+        value = re.sub(r"[^a-z0-9_]+", "_", value)
+        value = re.sub(r"_+", "_", value)
+        return value.strip("_")
+
+    def _choose_bundle_target_root(self) -> Path | None:
+        user_root = default_user_bundles_dir()
+        builtin_root = default_bundles_dir()
+        options = [
+            f"User bundles ({user_root}) [Recommended]",
+            f"Built-in bundles ({builtin_root})",
+            "Custom folder...",
+        ]
+        ok, choice = self._guided_prompt_choice(
+            "Guided Component Setup",
+            "Where should new component bundles be created?",
+            options,
+            default_index=0,
+        )
+        if not ok:
+            return None
+        if choice.startswith("User bundles"):
+            return user_root
+        if choice.startswith("Built-in bundles"):
+            return builtin_root
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Bundle Root Directory",
+            str(Path.home()),
+        )
+        if not folder:
+            return None
+        return Path(folder).expanduser()
+
+    def _collect_mainboard_bundle_spec(self) -> dict[str, Any] | None:
+        title = "Mainboard Bundle Wizard"
+        ok, raw_id = self._guided_prompt_text(title, "Board ID", "my_custom_mainboard")
+        if not ok:
+            return None
+        board_id = self._slugify_component_id(raw_id) or "my_custom_mainboard"
+
+        ok, label = self._guided_prompt_text(title, "Board label", "My Custom Mainboard")
+        if not ok:
+            return None
+        ok, mcu = self._guided_prompt_text(title, "MCU", "stm32f446xx")
+        if not ok:
+            return None
+        serial_default = f"/dev/serial/by-id/usb-{board_id}"
+        ok, serial_hint = self._guided_prompt_text(title, "Serial hint", serial_default)
+        if not ok:
+            return None
+
+        payload = {
+            "id": board_id,
+            "label": label.strip() or board_id,
+            "mcu": mcu.strip() or "stm32f446xx",
+            "serial_hint": serial_hint.strip() or serial_default,
+            "pins": {
+                "stepper_x_step": "PB13",
+                "stepper_x_dir": "PB12",
+                "stepper_x_enable": "PB14",
+                "heater_hotend": "PA2",
+                "temp_hotend": "PF4",
+            },
+            "layout": {
+                "Stepper Drivers": ["X", "Y", "Z", "E0"],
+                "Heaters": ["HE0", "BED"],
+            },
+        }
+        return {"component_type": "mainboard", "id": board_id, "payload": payload}
+
+    def _collect_toolhead_bundle_spec(self) -> dict[str, Any] | None:
+        title = "Toolhead PCB Bundle Wizard"
+        ok, raw_id = self._guided_prompt_text(title, "Toolhead board ID", "my_custom_toolhead")
+        if not ok:
+            return None
+        board_id = self._slugify_component_id(raw_id) or "my_custom_toolhead"
+
+        ok, label = self._guided_prompt_text(title, "Toolhead label", "My Custom Toolhead")
+        if not ok:
+            return None
+        ok, mcu = self._guided_prompt_text(title, "MCU", "rp2040")
+        if not ok:
+            return None
+        ok, transport = self._guided_prompt_choice(
+            title,
+            "Transport type",
+            ["can", "usb"],
+            default_index=0,
+        )
+        if not ok:
+            return None
+        serial_default = (
+            "canbus_uuid: replace-with-uuid"
+            if transport == "can"
+            else f"/dev/serial/by-id/usb-{board_id}"
+        )
+        ok, serial_hint = self._guided_prompt_text(title, "Serial hint", serial_default)
+        if not ok:
+            return None
+
+        payload = {
+            "id": board_id,
+            "label": label.strip() or board_id,
+            "mcu": mcu.strip() or "rp2040",
+            "transport": transport,
+            "serial_hint": serial_hint.strip() or serial_default,
+            "pins": {
+                "extruder_step": "toolhead:EXT_STEP",
+                "extruder_dir": "toolhead:EXT_DIR",
+                "extruder_enable": "toolhead:EXT_EN",
+                "heater_hotend": "toolhead:HE0",
+                "temp_hotend": "toolhead:TH0",
+            },
+            "layout": {
+                "Motor and Heater": ["EXT_STEP", "EXT_DIR", "EXT_EN", "HE0"],
+                "Sensors": ["TH0", "PROBE", "FS0"],
+            },
+        }
+        return {"component_type": "toolhead_board", "id": board_id, "payload": payload}
+
+    def _collect_addon_bundle_spec(self) -> dict[str, Any] | None:
+        title = "Add-on Bundle Wizard"
+        ok, raw_id = self._guided_prompt_text(title, "Add-on ID", "my_custom_addon")
+        if not ok:
+            return None
+        addon_id = self._slugify_component_id(raw_id) or "my_custom_addon"
+
+        ok, label = self._guided_prompt_text(title, "Add-on label", "My Custom Add-on")
+        if not ok:
+            return None
+        ok, description = self._guided_prompt_text(
+            title,
+            "Description",
+            "Add-on scaffold generated by Guided Component Setup.",
+        )
+        if not ok:
+            return None
+        template_default = f"addons/{addon_id}.cfg.j2"
+        ok, template_rel = self._guided_prompt_text(
+            title,
+            "Template path (relative to templates/)",
+            template_default,
+        )
+        if not ok:
+            return None
+        template_rel = template_rel.strip().replace("\\", "/") or template_default
+
+        ok, family_text = self._guided_prompt_text(
+            title,
+            "Supported families (comma separated)",
+            "voron",
+        )
+        if not ok:
+            return None
+        supported_families = [
+            family.strip() for family in family_text.split(",") if family.strip()
+        ] or ["voron"]
+
+        create_template_choice = QMessageBox.question(
+            self,
+            title,
+            f"Create template scaffold at templates/{template_rel}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        create_template = create_template_choice == QMessageBox.StandardButton.Yes
+        template_content = ""
+        if create_template:
+            macro_name = self._slugify_component_id(addon_id).upper() or "CUSTOM_ADDON"
+            template_content = (
+                f"# Add-on scaffold: {label.strip() or addon_id}\n"
+                f"[gcode_macro {macro_name}_STATUS]\n"
+                "gcode:\n"
+                '  RESPOND PREFIX="info" MSG="Addon ready"\n'
+            )
+
+        payload = {
+            "id": addon_id,
+            "label": label.strip() or addon_id,
+            "template": template_rel,
+            "description": description.strip(),
+            "multi_material": False,
+            "recommends_toolhead": False,
+            "supported_families": supported_families,
+        }
+        spec: dict[str, Any] = {"component_type": "addon", "id": addon_id, "payload": payload}
+        if create_template:
+            spec["template_rel"] = template_rel
+            spec["template_content"] = template_content
+        return spec
+
+    def _collect_macro_template_spec(self) -> dict[str, Any] | None:
+        title = "Macro Template Wizard"
+        ok, raw_id = self._guided_prompt_text(title, "Macro template ID", "my_custom_macro")
+        if not ok:
+            return None
+        macro_id = self._slugify_component_id(raw_id) or "my_custom_macro"
+        template_rel = f"macros/{macro_id}.cfg.j2"
+        macro_name = macro_id.upper()
+        template_content = (
+            f"# Macro scaffold: {macro_id}\n"
+            f"[gcode_macro {macro_name}]\n"
+            "gcode:\n"
+            "  RESPOND PREFIX=\"info\" MSG=\"Custom macro pack scaffold\"\n"
+        )
+        return {
+            "component_type": "macro_template",
+            "id": macro_id,
+            "template_rel": template_rel,
+            "template_content": template_content,
+        }
+
+    def _run_guided_component_setup_wizard(self) -> tuple[Path, dict[str, Any]] | None:
+        ok, component_type = self._guided_prompt_choice(
+            "Guided Component Setup",
+            "What component would you like to create?",
+            [
+                "Mainboard Bundle",
+                "Toolhead PCB Bundle",
+                "Add-on Bundle",
+                "Macro Template Scaffold",
+            ],
+            default_index=0,
+        )
+        if not ok:
+            return None
+
+        bundle_root = self._choose_bundle_target_root()
+        if bundle_root is None:
+            return None
+
+        builders: dict[str, Any] = {
+            "Mainboard Bundle": self._collect_mainboard_bundle_spec,
+            "Toolhead PCB Bundle": self._collect_toolhead_bundle_spec,
+            "Add-on Bundle": self._collect_addon_bundle_spec,
+            "Macro Template Scaffold": self._collect_macro_template_spec,
+        }
+        builder = builders.get(component_type)
+        if builder is None:
+            return None
+        spec = builder()
+        if spec is None:
+            return None
+        return bundle_root, spec
+
+    def _write_guided_bundle_spec(self, bundle_root: Path, spec: dict[str, Any]) -> list[Path]:
+        created: list[Path] = []
+        component_type = str(spec.get("component_type") or "")
+        component_id = str(spec.get("id") or "").strip()
+
+        if component_type in {"mainboard", "toolhead_board", "addon"}:
+            if not component_id:
+                raise ValueError("Component ID is required.")
+            subdir = {
+                "mainboard": "boards",
+                "toolhead_board": "toolhead_boards",
+                "addon": "addons",
+            }[component_type]
+            payload = spec.get("payload")
+            if not isinstance(payload, dict):
+                raise ValueError("Bundle payload is missing.")
+            target_json = bundle_root / subdir / f"{component_id}.json"
+            self._write_guided_file(
+                target_json,
+                json.dumps(payload, indent=2, sort_keys=False) + "\n",
+            )
+            created.append(target_json)
+
+        template_rel = str(spec.get("template_rel") or "").strip().replace("\\", "/")
+        if template_rel:
+            template_parts = [part for part in template_rel.split("/") if part]
+            if any(part == ".." for part in template_parts):
+                raise ValueError("Template path cannot contain '..'.")
+            template_path = bundle_root / "templates" / Path(*template_parts)
+            template_content = str(spec.get("template_content") or "").rstrip() + "\n"
+            self._write_guided_file(template_path, template_content)
+            created.append(template_path)
+
+        if not created:
+            raise ValueError("No output was generated by guided component setup.")
+        return created
+
+    def _write_guided_file(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Overwrite Existing File",
+                f"File already exists:\n{path}\n\nOverwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                raise RuntimeError("User cancelled overwrite.")
+        path.write_text(content, encoding="utf-8")
+
+    def _refresh_bundle_backed_component_options(self) -> None:
+        refresh_bundle_catalog()
+        self.addon_options = self._build_addon_options()
+        for addon_id in self.addon_options:
+            if addon_id not in self.addon_checkboxes:
+                self._add_addon_checkbox(addon_id)
+
+        if self.current_preset is None:
+            return
+        available_boards = sorted(set(self.current_preset.supported_boards).union(list_main_boards()))
+        available_toolheads = sorted(
+            set(self.current_preset.supported_toolhead_boards).union(list_toolhead_boards())
+        )
+        self._populate_board_combo(available_boards)
+        self._populate_toolhead_board_combos(available_toolheads)
+        self._apply_addon_support(self.current_preset)
+        self._refresh_board_summary()
+        self._render_and_validate()
+
+    def _open_guided_component_setup(self) -> None:
+        guided_result = self._run_guided_component_setup_wizard()
+        if guided_result is None:
+            return
+        bundle_root, spec = guided_result
+
+        try:
+            created_paths = self._write_guided_bundle_spec(bundle_root, spec)
+        except RuntimeError:
+            return
+        except (OSError, ValueError) as exc:
+            self._show_error("Guided Component Setup", str(exc))
+            return
+
+        self._refresh_bundle_backed_component_options()
+        created_lines = "\n".join(str(path) for path in created_paths)
+        QMessageBox.information(
+            self,
+            "Guided Component Setup",
+            (
+                "Created bundle files:\n"
+                f"{created_lines}\n\n"
+                "Reloaded bundle catalog. New boards/add-ons are available immediately."
+            ),
+        )
+        self.statusBar().showMessage("Guided component setup created bundle files", 3000)
 
     def _show_about_window(self) -> None:
         self._ensure_about_window()
@@ -1212,8 +1608,32 @@ class MainWindow(QMainWindow):
             if self.current_project is not None:
                 base_project = self.current_project
             else:
-                self._show_error("Import Review", "Current UI project is invalid and cannot be updated.")
-                return
+                suggested_preset: str | None = None
+                for suggestion in selected:
+                    if suggestion.field != "preset_id":
+                        continue
+                    if isinstance(suggestion.value, str) and suggestion.value.strip():
+                        suggested_preset = suggestion.value.strip()
+                        break
+
+                target_index = -1
+                if suggested_preset:
+                    target_index = self.preset_combo.findData(suggested_preset)
+                if target_index < 0:
+                    target_index = self.preset_combo.findData(self.DEFAULT_VORON_PRESET_ID)
+                if target_index < 0 and self.preset_combo.count() > 1:
+                    target_index = 1
+                if target_index >= 0:
+                    self.preset_combo.setCurrentIndex(target_index)
+
+                try:
+                    base_project = self._build_project_from_ui()
+                except Exception:  # noqa: BLE001
+                    self._show_error(
+                        "Import Review",
+                        "Current UI project is invalid and cannot be updated.",
+                    )
+                    return
 
         profile = self.current_import_profile.model_copy(deep=True)
         profile.suggestions = selected
@@ -1638,7 +2058,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         top_row = QHBoxLayout()
-        self.render_validate_btn = QPushButton("Render + Validate", tab)
+        self.render_validate_btn = QPushButton("Compile", tab)
         self.render_validate_btn.clicked.connect(self._render_and_validate)
         top_row.addWidget(self.render_validate_btn)
 
@@ -1648,11 +2068,19 @@ class MainWindow(QMainWindow):
         layout.addLayout(top_row)
 
         grid = QGridLayout()
-        grid.setColumnStretch(0, 3)
-        grid.setColumnStretch(1, 2)
+        grid.setColumnStretch(0, 2)
+        grid.setColumnStretch(1, 3)
 
         wizard_group = QGroupBox("Core Hardware", tab)
         wizard_form = QFormLayout(wizard_group)
+
+        self.vendor_combo = QComboBox(wizard_group)
+        self.vendor_combo.addItem("None", "")
+        self.vendor_combo.addItem("custom printer", "custom_printer")
+        self.vendor_combo.addItem("Voron", "voron")
+        self.vendor_combo.setCurrentIndex(0)
+        self.vendor_combo.currentIndexChanged.connect(self._on_vendor_changed)
+        wizard_form.addRow("Vendor", self.vendor_combo)
 
         self.preset_combo = QComboBox(wizard_group)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
@@ -1677,26 +2105,21 @@ class MainWindow(QMainWindow):
         self.dimension_z.valueChanged.connect(self._render_and_validate)
         wizard_form.addRow("Z size (mm)", self.dimension_z)
 
-        self.probe_enabled_checkbox = QCheckBox("Enable probe", wizard_group)
-        self.probe_enabled_checkbox.setObjectName("probe_enabled")
-        self.probe_enabled_checkbox.toggled.connect(self._sync_probe_controls)
-        self.probe_enabled_checkbox.toggled.connect(self._render_and_validate)
-        wizard_form.addRow(self.probe_enabled_checkbox)
-
         self.probe_type_combo = QComboBox(wizard_group)
         self.probe_type_combo.setEditable(True)
         self.probe_type_combo.currentTextChanged.connect(self._render_and_validate)
-        wizard_form.addRow("Probe type", self.probe_type_combo)
+        wizard_form.addRow("Probe", self.probe_type_combo)
 
-        self.toolhead_enabled_checkbox = QCheckBox("Enable CAN toolhead board", wizard_group)
-        self.toolhead_enabled_checkbox.setObjectName("toolhead_enabled")
-        self.toolhead_enabled_checkbox.toggled.connect(self._sync_toolhead_controls)
-        self.toolhead_enabled_checkbox.toggled.connect(self._render_and_validate)
-        wizard_form.addRow(self.toolhead_enabled_checkbox)
+        self.toolhead_usb_board_combo = QComboBox(wizard_group)
+        self.toolhead_usb_board_combo.currentIndexChanged.connect(self._on_toolhead_usb_board_changed)
+        wizard_form.addRow("USB toolhead board", self.toolhead_usb_board_combo)
 
-        self.toolhead_board_combo = QComboBox(wizard_group)
-        self.toolhead_board_combo.currentIndexChanged.connect(self._render_and_validate)
-        wizard_form.addRow("Toolhead board", self.toolhead_board_combo)
+        self.toolhead_can_board_combo = QComboBox(wizard_group)
+        self.toolhead_can_board_combo.currentIndexChanged.connect(self._on_toolhead_can_board_changed)
+        wizard_form.addRow("CAN toolhead board", self.toolhead_can_board_combo)
+
+        # Backward-compatible alias used in older tests/helpers.
+        self.toolhead_board_combo = self.toolhead_can_board_combo
 
         self.toolhead_canbus_uuid_edit = QLineEdit(wizard_group)
         self.toolhead_canbus_uuid_edit.setPlaceholderText("replace-with-canbus-uuid")
@@ -1704,12 +2127,12 @@ class MainWindow(QMainWindow):
         wizard_form.addRow("CAN UUID", self.toolhead_canbus_uuid_edit)
 
         self.hotend_thermistor_edit = QLineEdit(wizard_group)
-        self.hotend_thermistor_edit.setText("EPCOS 100K B57560G104F")
+        self.hotend_thermistor_edit.setPlaceholderText("Hotend Thermistor")
         self.hotend_thermistor_edit.textChanged.connect(self._render_and_validate)
         wizard_form.addRow("Hotend thermistor", self.hotend_thermistor_edit)
 
         self.bed_thermistor_edit = QLineEdit(wizard_group)
-        self.bed_thermistor_edit.setText("EPCOS 100K B57560G104F")
+        self.bed_thermistor_edit.setPlaceholderText("Bed Thermistor")
         self.bed_thermistor_edit.textChanged.connect(self._render_and_validate)
         wizard_form.addRow("Bed thermistor", self.bed_thermistor_edit)
 
@@ -1717,9 +2140,18 @@ class MainWindow(QMainWindow):
 
         options_group = QGroupBox("Macro Packs and Add-ons", tab)
         options_layout = QVBoxLayout(options_group)
+        options_layout.setSpacing(6)
 
-        self.macros_group = QGroupBox("Macro Packs", options_group)
+        (
+            macros_section,
+            self.macros_section_toggle,
+            self.macros_section_content,
+            macros_section_layout,
+        ) = self._build_collapsible_section("Macro Packs", options_group, expanded=True)
+        self.macros_group = QWidget(self.macros_section_content)
         macros_layout = QVBoxLayout(self.macros_group)
+        macros_layout.setContentsMargins(0, 0, 0, 0)
+        macros_layout.setSpacing(4)
         self.macro_checkboxes: dict[str, QCheckBox] = {}
         for key, label in self.MACRO_PACK_OPTIONS.items():
             checkbox = QCheckBox(label, self.macros_group)
@@ -1729,10 +2161,20 @@ class MainWindow(QMainWindow):
             )
             macros_layout.addWidget(checkbox)
             self.macro_checkboxes[key] = checkbox
-        options_layout.addWidget(self.macros_group)
+        macros_layout.addStretch(1)
+        macros_section_layout.addWidget(self.macros_group)
+        options_layout.addWidget(macros_section)
 
-        self.addons_group = QGroupBox("Add-ons", options_group)
+        (
+            addons_section,
+            self.addons_section_toggle,
+            self.addons_section_content,
+            addons_section_layout,
+        ) = self._build_collapsible_section("Add-ons", options_group, expanded=True)
+        self.addons_group = QWidget(self.addons_section_content)
         addons_layout = QVBoxLayout(self.addons_group)
+        addons_layout.setContentsMargins(0, 0, 0, 0)
+        addons_layout.setSpacing(4)
         self.addons_layout = addons_layout
         self.addon_checkboxes: dict[str, QCheckBox] = {}
         for key, label in self.addon_options.items():
@@ -1743,10 +2185,19 @@ class MainWindow(QMainWindow):
             )
             addons_layout.addWidget(checkbox)
             self.addon_checkboxes[key] = checkbox
-        options_layout.addWidget(self.addons_group)
+        addons_layout.addStretch(1)
+        addons_section_layout.addWidget(self.addons_group)
+        options_layout.addWidget(addons_section)
 
-        self.led_group = QGroupBox("LED Control", options_group)
+        (
+            led_section,
+            self.led_section_toggle,
+            self.led_section_content,
+            led_section_layout,
+        ) = self._build_collapsible_section("LED Control", options_group, expanded=False)
+        self.led_group = QWidget(self.led_section_content)
         led_form = QFormLayout(self.led_group)
+        led_form.setContentsMargins(0, 0, 0, 0)
 
         self.led_enabled_checkbox = QCheckBox("Enable status LEDs", self.led_group)
         self.led_enabled_checkbox.setObjectName("led_enabled")
@@ -1795,14 +2246,37 @@ class MainWindow(QMainWindow):
         self.led_initial_blue_spin.valueChanged.connect(self._render_and_validate)
         led_form.addRow("Initial blue", self.led_initial_blue_spin)
 
-        options_layout.addWidget(self.led_group)
+        led_section_layout.addWidget(self.led_group)
+        options_layout.addWidget(led_section)
 
-        self.board_summary = QPlainTextEdit(options_group)
-        self.board_summary.setReadOnly(True)
-        self.board_summary.setPlaceholderText("Board details and connector groups appear here.")
-        options_layout.addWidget(self.board_summary, 1)
+        grid.addWidget(options_group, 1, 0)
 
-        grid.addWidget(options_group, 0, 1)
+        package_splitter = QSplitter(Qt.Orientation.Horizontal, tab)
+
+        package_list_group = QGroupBox("Project Package", package_splitter)
+        package_list_layout = QVBoxLayout(package_list_group)
+        self.wizard_package_file_list = QListWidget(package_list_group)
+        self.wizard_package_file_list.itemSelectionChanged.connect(
+            self._on_wizard_package_file_selected
+        )
+        package_list_layout.addWidget(self.wizard_package_file_list, 1)
+
+        package_preview_group = QGroupBox("Selected File Preview", package_splitter)
+        package_preview_layout = QVBoxLayout(package_preview_group)
+        self.wizard_package_preview_label = QLabel("No generated files.", package_preview_group)
+        self.wizard_package_preview_label.setWordWrap(True)
+        package_preview_layout.addWidget(self.wizard_package_preview_label)
+        self.wizard_package_preview = QPlainTextEdit(package_preview_group)
+        self.wizard_package_preview.setReadOnly(True)
+        self.wizard_package_preview.setPlaceholderText(
+            "Compile to generate package files and preview their contents."
+        )
+        package_preview_layout.addWidget(self.wizard_package_preview, 1)
+
+        package_splitter.setStretchFactor(0, 1)
+        package_splitter.setStretchFactor(1, 3)
+        grid.addWidget(package_splitter, 0, 1, 2, 1)
+
         layout.addLayout(grid)
         return tab
 
@@ -1997,7 +2471,7 @@ class MainWindow(QMainWindow):
 
         button_row.addStretch(1)
 
-        validate_btn = QPushButton("Render + Validate", self.overrides_section_content)
+        validate_btn = QPushButton("Compile", self.overrides_section_content)
         validate_btn.clicked.connect(self._render_and_validate)
         button_row.addWidget(validate_btn)
 
@@ -2218,11 +2692,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(options_group)
 
         action_hint = QLabel(
-            "Use Tools -> Printer Connection for Connect, Open Remote File, and Deploy Generated Pack.",
+            "Use Tools -> Printer Connection for Connect, Open Remote File, Explore Config Directory, and Deploy Generated Pack.",
             tab,
         )
         action_hint.setWordWrap(True)
         layout.addWidget(action_hint)
+
+        ssh_actions_row = QHBoxLayout()
+        self.ssh_explore_config_btn = QPushButton("Explore Config Directory", tab)
+        self.ssh_explore_config_btn.clicked.connect(self._explore_connected_config_directory)
+        ssh_actions_row.addWidget(self.ssh_explore_config_btn)
+        ssh_actions_row.addStretch(1)
+        layout.addLayout(ssh_actions_row)
 
         (
             ssh_log_section,
@@ -2406,6 +2887,7 @@ class MainWindow(QMainWindow):
 
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
+        self.preset_combo.addItem("None", None)
         self.presets_by_id.clear()
         for summary in summaries:
             self.preset_combo.addItem(summary.name, summary.id)
@@ -2416,9 +2898,41 @@ class MainWindow(QMainWindow):
             self.preset_combo.setCurrentIndex(0)
             self._on_preset_changed(0)
 
+    def _on_vendor_changed(self, _: int) -> None:
+        vendor = str(self.vendor_combo.currentData() or "")
+        if vendor == "voron":
+            default_index = self.preset_combo.findData(self.DEFAULT_VORON_PRESET_ID)
+            if default_index < 0 and self.preset_combo.count() > 1:
+                default_index = 1
+            if default_index >= 0 and self.preset_combo.currentIndex() != default_index:
+                self.preset_combo.setCurrentIndex(default_index)
+            return
+
+        if self.preset_combo.currentIndex() != 0:
+            self.preset_combo.setCurrentIndex(0)
+
     def _on_preset_changed(self, _: int) -> None:
         preset_id = self.preset_combo.currentData()
         if not isinstance(preset_id, str):
+            self.current_preset = None
+            self.preset_notes_label.setText("")
+            self._populate_board_combo([])
+            self._populate_toolhead_board_combos([])
+            self._populate_probe_types(None)
+            self.macros_group.setEnabled(False)
+            for checkbox in self.macro_checkboxes.values():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.blockSignals(False)
+            for checkbox in self.addon_checkboxes.values():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+                checkbox.blockSignals(False)
+            self._sync_toolhead_controls()
+            self._sync_led_controls()
+            self._refresh_board_summary()
+            self._render_and_validate()
             return
 
         preset = self.presets_by_id.get(preset_id)
@@ -2433,7 +2947,7 @@ class MainWindow(QMainWindow):
             set(preset.supported_toolhead_boards).union(list_toolhead_boards())
         )
         self._populate_board_combo(available_boards)
-        self._populate_toolhead_board_combo(available_toolheads)
+        self._populate_toolhead_board_combos(available_toolheads)
         self._populate_probe_types(preset)
         self._apply_addon_support(preset)
 
@@ -2448,10 +2962,7 @@ class MainWindow(QMainWindow):
             self.dimension_x.setValue(preset.build_volume.x)
             self.dimension_y.setValue(preset.build_volume.y)
             self.dimension_z.setValue(preset.build_volume.z)
-            if not preset.feature_flags.probe_optional:
-                self.probe_enabled_checkbox.setChecked(True)
 
-        self._sync_probe_controls()
         self._sync_toolhead_controls()
         self._sync_led_controls()
         self._refresh_board_summary()
@@ -2461,6 +2972,7 @@ class MainWindow(QMainWindow):
         current = self.board_combo.currentData()
         self.board_combo.blockSignals(True)
         self.board_combo.clear()
+        self.board_combo.addItem("Choose your mainboard", None)
         for board_id in board_ids:
             self.board_combo.addItem(self._format_board_label(board_id), board_id)
 
@@ -2469,27 +2981,76 @@ class MainWindow(QMainWindow):
             self.board_combo.setCurrentIndex(0)
         self.board_combo.blockSignals(False)
 
-    def _populate_toolhead_board_combo(self, board_ids: list[str]) -> None:
-        current = self.toolhead_board_combo.currentData()
-        self.toolhead_board_combo.blockSignals(True)
-        self.toolhead_board_combo.clear()
-        self.toolhead_board_combo.addItem("None", None)
-        for board_id in board_ids:
-            self.toolhead_board_combo.addItem(self._format_toolhead_board_label(board_id), board_id)
+    def _populate_toolhead_board_combos(self, board_ids: list[str]) -> None:
+        current_can = self.toolhead_can_board_combo.currentData()
+        current_usb = self.toolhead_usb_board_combo.currentData()
 
-        self._set_combo_to_value(self.toolhead_board_combo, current)
-        self.toolhead_board_combo.blockSignals(False)
+        can_ids = sorted(
+            (board_id for board_id in board_ids if toolhead_board_transport(board_id) == "can"),
+            key=lambda board_id: self._format_toolhead_board_label(board_id).lower(),
+        )
+        usb_ids = sorted(
+            (board_id for board_id in board_ids if toolhead_board_transport(board_id) == "usb"),
+            key=lambda board_id: self._format_toolhead_board_label(board_id).lower(),
+        )
 
-    def _populate_probe_types(self, preset: Preset) -> None:
+        self.toolhead_can_board_combo.blockSignals(True)
+        self.toolhead_can_board_combo.clear()
+        self.toolhead_can_board_combo.addItem("None", None)
+        for board_id in can_ids:
+            self.toolhead_can_board_combo.addItem(self._format_toolhead_board_label(board_id), board_id)
+        self._set_combo_to_value(self.toolhead_can_board_combo, current_can)
+        self.toolhead_can_board_combo.blockSignals(False)
+
+        self.toolhead_usb_board_combo.blockSignals(True)
+        self.toolhead_usb_board_combo.clear()
+        self.toolhead_usb_board_combo.addItem("None", None)
+        for board_id in usb_ids:
+            self.toolhead_usb_board_combo.addItem(self._format_toolhead_board_label(board_id), board_id)
+        self._set_combo_to_value(self.toolhead_usb_board_combo, current_usb)
+        self.toolhead_usb_board_combo.blockSignals(False)
+
+    def _selected_toolhead_board(self) -> tuple[str | None, str | None]:
+        can_board = self.toolhead_can_board_combo.currentData()
+        if isinstance(can_board, str):
+            return can_board, "can"
+        usb_board = self.toolhead_usb_board_combo.currentData()
+        if isinstance(usb_board, str):
+            return usb_board, "usb"
+        return None, None
+
+    def _on_toolhead_can_board_changed(self, _: int) -> None:
+        if isinstance(self.toolhead_can_board_combo.currentData(), str):
+            self.toolhead_usb_board_combo.blockSignals(True)
+            self.toolhead_usb_board_combo.setCurrentIndex(0)
+            self.toolhead_usb_board_combo.blockSignals(False)
+        self._sync_toolhead_controls()
+        self._render_and_validate()
+
+    def _on_toolhead_usb_board_changed(self, _: int) -> None:
+        if isinstance(self.toolhead_usb_board_combo.currentData(), str):
+            self.toolhead_can_board_combo.blockSignals(True)
+            self.toolhead_can_board_combo.setCurrentIndex(0)
+            self.toolhead_can_board_combo.blockSignals(False)
+        self._sync_toolhead_controls()
+        self._render_and_validate()
+
+    def _populate_probe_types(self, preset: Preset | None) -> None:
         current = self.probe_type_combo.currentText().strip()
-        probe_types = list(dict.fromkeys([*preset.recommended_probe_types, *self.DEFAULT_PROBE_TYPES]))
+        probe_types = list(self.DEFAULT_PROBE_TYPES)
+        if preset is not None:
+            probe_types = list(
+                dict.fromkeys([*preset.recommended_probe_types, *self.DEFAULT_PROBE_TYPES])
+            )
         self.probe_type_combo.blockSignals(True)
         self.probe_type_combo.clear()
-        self.probe_type_combo.addItem("")
+        self.probe_type_combo.addItem("None")
         for probe_type in probe_types:
             self.probe_type_combo.addItem(probe_type)
-        if current:
+        if current and current.lower() != "none":
             self.probe_type_combo.setCurrentText(current)
+        else:
+            self.probe_type_combo.setCurrentIndex(0)
         self.probe_type_combo.blockSignals(False)
 
     def _apply_addon_support(self, preset: Preset) -> None:
@@ -2538,13 +3099,9 @@ class MainWindow(QMainWindow):
     def _on_addon_checkbox_toggled(self, _addon_name: str, _checked: bool) -> None:
         self._render_and_validate()
 
-    def _sync_probe_controls(self) -> None:
-        self.probe_type_combo.setEnabled(self.probe_enabled_checkbox.isChecked())
-
     def _sync_toolhead_controls(self) -> None:
-        enabled = self.toolhead_enabled_checkbox.isChecked()
-        self.toolhead_board_combo.setEnabled(enabled)
-        self.toolhead_canbus_uuid_edit.setEnabled(enabled)
+        selected_board, transport = self._selected_toolhead_board()
+        self.toolhead_canbus_uuid_edit.setEnabled(selected_board is not None and transport == "can")
 
     def _sync_led_controls(self) -> None:
         enabled = self.led_enabled_checkbox.isChecked()
@@ -2577,15 +3134,15 @@ class MainWindow(QMainWindow):
         if not isinstance(board_id, str):
             board_id = ""
 
-        probe_enabled = self.probe_enabled_checkbox.isChecked()
-        probe_type = self.probe_type_combo.currentText().strip() or None
+        raw_probe_type = self.probe_type_combo.currentText().strip()
+        probe_type = raw_probe_type if raw_probe_type and raw_probe_type.lower() != "none" else None
+        probe_enabled = probe_type is not None
 
-        toolhead_enabled = self.toolhead_enabled_checkbox.isChecked()
-        toolhead_board = self.toolhead_board_combo.currentData() if toolhead_enabled else None
-        if toolhead_enabled and not isinstance(toolhead_board, str):
-            toolhead_board = None
+        toolhead_board, toolhead_transport = self._selected_toolhead_board()
+        toolhead_enabled = toolhead_board is not None
+
         toolhead_uuid = self.toolhead_canbus_uuid_edit.text().strip() or None
-        if not toolhead_enabled:
+        if not toolhead_enabled or toolhead_transport != "can":
             toolhead_uuid = None
 
         payload = {
@@ -2598,7 +3155,7 @@ class MainWindow(QMainWindow):
             },
             "probe": {
                 "enabled": probe_enabled,
-                "type": probe_type if probe_enabled else None,
+                "type": probe_type,
             },
             "thermistors": {
                 "hotend": self.hotend_thermistor_edit.text().strip() or "EPCOS 100K B57560G104F",
@@ -2725,7 +3282,7 @@ class MainWindow(QMainWindow):
         self._update_generated_files_view(pack)
         self._update_action_enablement()
         self._refresh_board_summary()
-        self.statusBar().showMessage("Render + validation complete", 2500)
+        self.statusBar().showMessage("Compile complete", 2500)
 
     def _update_validation_view(self, report: ValidationReport) -> None:
         sorted_findings = sorted(
@@ -2865,7 +3422,67 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Blocking conflicts: {len(blocking_findings)}", 3000)
         self._last_blocking_alert_snapshot = snapshot
 
+    def _on_wizard_package_file_selected(self) -> None:
+        self._update_wizard_package_preview()
+
+    def _update_wizard_package_view(self, pack: RenderedPack | None) -> None:
+        if not hasattr(self, "wizard_package_file_list"):
+            return
+
+        current_name = ""
+        current_item = self.wizard_package_file_list.currentItem()
+        if current_item is not None:
+            current_name = current_item.text().strip()
+
+        self.wizard_package_file_list.blockSignals(True)
+        self.wizard_package_file_list.clear()
+        if pack is not None:
+            for name in pack.files.keys():
+                self.wizard_package_file_list.addItem(name)
+        self.wizard_package_file_list.blockSignals(False)
+
+        if self.wizard_package_file_list.count() <= 0:
+            if hasattr(self, "wizard_package_preview_label"):
+                self.wizard_package_preview_label.setText("No generated files.")
+            if hasattr(self, "wizard_package_preview"):
+                self.wizard_package_preview.clear()
+                self.wizard_package_preview.setPlainText(
+                    "Compile to generate package files and preview their contents."
+                )
+            return
+
+        target_row = 0
+        if current_name:
+            for row in range(self.wizard_package_file_list.count()):
+                item = self.wizard_package_file_list.item(row)
+                if item is not None and item.text() == current_name:
+                    target_row = row
+                    break
+        self.wizard_package_file_list.setCurrentRow(target_row)
+        self._update_wizard_package_preview()
+
+    def _update_wizard_package_preview(self) -> None:
+        if not hasattr(self, "wizard_package_preview"):
+            return
+        if self.current_pack is None:
+            self.wizard_package_preview_label.setText("No generated files.")
+            self.wizard_package_preview.clear()
+            return
+
+        item = self.wizard_package_file_list.currentItem()
+        if item is None:
+            self.wizard_package_preview_label.setText("No generated files selected.")
+            self.wizard_package_preview.clear()
+            return
+
+        file_name = item.text()
+        content = self.current_pack.files.get(file_name, "")
+        self.wizard_package_preview_label.setText(f"Generated: {file_name}")
+        self.wizard_package_preview.setPlainText(content)
+
     def _update_generated_files_view(self, pack: RenderedPack | None) -> None:
+        self._update_wizard_package_view(pack)
+
         if pack is not None and "printer.cfg" in pack.files:
             self._set_persistent_preview_source(
                 content=pack.files["printer.cfg"],
@@ -3456,6 +4073,7 @@ class MainWindow(QMainWindow):
         if self.preset_combo.count() == 0:
             return
         self._applying_project = False
+        self.vendor_combo.setCurrentIndex(0)
         self.preset_combo.setCurrentIndex(0)
         self._on_preset_changed(0)
         self._clear_overrides(skip_confirm=True)
@@ -3486,16 +4104,26 @@ class MainWindow(QMainWindow):
             self.dimension_y.setValue(project.dimensions.y)
             self.dimension_z.setValue(project.dimensions.z)
 
-            self.probe_enabled_checkbox.setChecked(project.probe.enabled)
-            self.probe_type_combo.setCurrentText(project.probe.type or "")
+            self.probe_type_combo.setCurrentText(project.probe.type or "None")
 
             self.hotend_thermistor_edit.setText(project.thermistors.hotend)
             self.bed_thermistor_edit.setText(project.thermistors.bed)
 
-            self.toolhead_enabled_checkbox.setChecked(project.toolhead.enabled)
-            toolhead_index = self.toolhead_board_combo.findData(project.toolhead.board)
-            if toolhead_index >= 0:
-                self.toolhead_board_combo.setCurrentIndex(toolhead_index)
+            self.toolhead_can_board_combo.blockSignals(True)
+            self.toolhead_usb_board_combo.blockSignals(True)
+            self.toolhead_can_board_combo.setCurrentIndex(0)
+            self.toolhead_usb_board_combo.setCurrentIndex(0)
+            if project.toolhead.board:
+                if toolhead_board_transport(project.toolhead.board) == "usb":
+                    toolhead_index = self.toolhead_usb_board_combo.findData(project.toolhead.board)
+                    if toolhead_index >= 0:
+                        self.toolhead_usb_board_combo.setCurrentIndex(toolhead_index)
+                else:
+                    toolhead_index = self.toolhead_can_board_combo.findData(project.toolhead.board)
+                    if toolhead_index >= 0:
+                        self.toolhead_can_board_combo.setCurrentIndex(toolhead_index)
+            self.toolhead_can_board_combo.blockSignals(False)
+            self.toolhead_usb_board_combo.blockSignals(False)
             self.toolhead_canbus_uuid_edit.setText(project.toolhead.canbus_uuid or "")
 
             self.led_enabled_checkbox.setChecked(project.leds.enabled)
@@ -3512,7 +4140,6 @@ class MainWindow(QMainWindow):
                 checkbox.setChecked(name in project.addons and checkbox.isEnabled())
 
             self._replace_overrides(project.advanced_overrides)
-            self._sync_probe_controls()
             self._sync_toolhead_controls()
             self._sync_led_controls()
         finally:
@@ -3556,8 +4183,11 @@ class MainWindow(QMainWindow):
         self._render_and_validate()
 
     def _refresh_board_summary(self) -> None:
+        if not hasattr(self, "board_summary"):
+            return
+
         board_id = self.board_combo.currentData()
-        toolhead_id = self.toolhead_board_combo.currentData()
+        toolhead_id, _ = self._selected_toolhead_board()
         lines: list[str] = []
 
         if isinstance(board_id, str):
@@ -3571,7 +4201,7 @@ class MainWindow(QMainWindow):
                     for section, connectors in main_profile.layout.items():
                         lines.append(f"  - {section}: {', '.join(connectors)}")
 
-        if self.toolhead_enabled_checkbox.isChecked() and isinstance(toolhead_id, str):
+        if isinstance(toolhead_id, str):
             tool_profile = get_toolhead_board_profile(toolhead_id)
             lines.append("")
             lines.append(f"Toolhead: {self._format_toolhead_board_label(toolhead_id)}")
@@ -3691,6 +4321,28 @@ class MainWindow(QMainWindow):
             return
         self.manage_host_edit.setText(host)
         self._append_manage_log(f"Using SSH host: {host}")
+
+    def _explore_connected_config_directory(self) -> None:
+        if not self.device_connected:
+            self._show_error(
+                "Printer Connection",
+                "Connect to a printer first, then explore its config directory.",
+            )
+            return
+
+        host = self.ssh_host_edit.text().strip()
+        if not host:
+            self._show_error("Printer Connection", "SSH host is empty.")
+            return
+
+        remote_dir = self.ssh_remote_dir_edit.text().strip() or "~/printer_data/config"
+        self.manage_host_edit.setText(host)
+        self.manage_remote_dir_edit.setText(remote_dir)
+        self.tabs.setCurrentWidget(self.manage_printer_tab)
+        self._append_ssh_log(f"Exploring config directory: {host} -> {remote_dir}")
+        self._append_manage_log(f"Exploring config directory: {host} -> {remote_dir}")
+        self._manage_refresh_files(target_dir=remote_dir)
+        self.statusBar().showMessage("Opened connected printer config explorer", 3000)
 
     def _resolve_manage_host(self) -> str:
         return self.manage_host_edit.text().strip() or self.ssh_host_edit.text().strip()
@@ -4361,21 +5013,60 @@ class MainWindow(QMainWindow):
             names = self.saved_connection_service.list_names()
         except OSError as exc:
             self._append_ssh_log(f"Failed to load saved connections: {exc}")
+            self._refresh_tools_connect_menu()
             return
 
-        self.ssh_saved_connection_combo.blockSignals(True)
-        self.ssh_saved_connection_combo.clear()
-        self.ssh_saved_connection_combo.addItems(names)
-        self.ssh_saved_connection_combo.blockSignals(False)
+        if hasattr(self, "ssh_saved_connection_combo"):
+            self.ssh_saved_connection_combo.blockSignals(True)
+            self.ssh_saved_connection_combo.clear()
+            self.ssh_saved_connection_combo.addItems(names)
+            self.ssh_saved_connection_combo.blockSignals(False)
 
-        target_name = (select_name or "").strip()
-        if target_name:
-            index = self.ssh_saved_connection_combo.findText(target_name)
-            if index >= 0:
-                self.ssh_saved_connection_combo.setCurrentIndex(index)
-                return
-        if self.ssh_saved_connection_combo.count() > 0:
-            self.ssh_saved_connection_combo.setCurrentIndex(0)
+            target_name = (select_name or "").strip()
+            if target_name:
+                index = self.ssh_saved_connection_combo.findText(target_name)
+                if index >= 0:
+                    self.ssh_saved_connection_combo.setCurrentIndex(index)
+                    self._refresh_tools_connect_menu()
+                    return
+            if self.ssh_saved_connection_combo.count() > 0:
+                self.ssh_saved_connection_combo.setCurrentIndex(0)
+
+        self._refresh_tools_connect_menu()
+
+    def _refresh_tools_connect_menu(self) -> None:
+        if not hasattr(self, "tools_connect_menu"):
+            return
+
+        self.tools_connect_menu.clear()
+        self.tools_connect_action = QAction("Current SSH Fields", self.tools_connect_menu)
+        self.tools_connect_action.triggered.connect(self._connect_ssh_to_host)
+        self.tools_connect_menu.addAction(self.tools_connect_action)
+        self.tools_connect_menu.addSeparator()
+
+        try:
+            saved_profiles = self.saved_connection_service.list_names()
+        except OSError as exc:
+            error_action = QAction(
+                f"(Failed to load saved connections: {exc})",
+                self.tools_connect_menu,
+            )
+            error_action.setEnabled(False)
+            self.tools_connect_menu.addAction(error_action)
+            return
+
+        if not saved_profiles:
+            empty_action = QAction("(No saved connections)", self.tools_connect_menu)
+            empty_action.setEnabled(False)
+            self.tools_connect_menu.addAction(empty_action)
+            return
+
+        for profile_name in saved_profiles:
+            profile_action = QAction(profile_name, self.tools_connect_menu)
+            profile_action.triggered.connect(
+                lambda checked=False, name=profile_name: self._connect_saved_connection(name)
+            )
+            self.tools_connect_menu.addAction(profile_action)
 
     def _build_connection_profile_payload(self) -> dict[str, Any] | None:
         host = self.ssh_host_edit.text().strip()
@@ -4430,13 +5121,24 @@ class MainWindow(QMainWindow):
         if not profile_name:
             self._show_error("Saved Connections", "No saved connection selected.")
             return
+        self._load_saved_connection_profile(profile_name)
+
+    def _load_saved_connection_profile(self, profile_name: str) -> bool:
+        profile_name = profile_name.strip()
+        if not profile_name:
+            self._show_error("Saved Connections", "No saved connection selected.")
+            return False
         profile = self.saved_connection_service.load(profile_name)
         if profile is None:
             self._show_error("Saved Connections", f"Connection '{profile_name}' was not found.")
             self._refresh_saved_connection_profiles()
-            return
+            return False
 
         self.ssh_connection_name_edit.setText(profile_name)
+        if hasattr(self, "ssh_saved_connection_combo"):
+            index = self.ssh_saved_connection_combo.findText(profile_name)
+            if index >= 0:
+                self.ssh_saved_connection_combo.setCurrentIndex(index)
         self.ssh_host_edit.setText(str(profile.get("host") or ""))
         try:
             port_value = int(profile.get("port") or 22)
@@ -4460,6 +5162,12 @@ class MainWindow(QMainWindow):
         self._append_ssh_log(f"Loaded connection profile '{profile_name}'.")
         self._append_modify_log(f"Loaded connection profile '{profile_name}'.")
         self.statusBar().showMessage(f"Loaded connection '{profile_name}'", 2500)
+        return True
+
+    def _connect_saved_connection(self, profile_name: str) -> None:
+        if not self._load_saved_connection_profile(profile_name):
+            return
+        self._connect_ssh_to_host()
 
     def _delete_selected_saved_connection(self) -> None:
         profile_name = self.ssh_saved_connection_combo.currentText().strip()

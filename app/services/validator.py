@@ -12,6 +12,7 @@ from app.services.board_registry import (
     get_addon_profile,
     get_board_profile,
     get_toolhead_board_profile,
+    toolhead_board_transport,
 )
 from app.services.paths import schemas_dir as default_schemas_dir
 from app.services.preset_catalog import PresetCatalogService
@@ -108,7 +109,7 @@ class ValidationService:
                 code="ADDON_RECOMMENDS_TOOLHEAD",
                 message=(
                     "Selected add-ons usually require a toolhead board and dedicated IO. "
-                    "Enable toolhead board if your hardware uses CAN toolheads."
+                    "Enable toolhead board when your hardware uses dedicated toolhead electronics."
                 ),
                 field="toolhead",
             )
@@ -144,13 +145,23 @@ class ValidationService:
                     field="toolhead.board",
                 )
 
-            if not project.toolhead.canbus_uuid:
-                report.add(
-                    severity="blocking",
-                    code="TOOLHEAD_CANBUS_UUID_REQUIRED",
-                    message="Toolhead board is enabled but canbus_uuid is empty.",
-                    field="toolhead.canbus_uuid",
-                )
+            if profile is not None and project.toolhead.board:
+                transport = toolhead_board_transport(project.toolhead.board)
+                if transport == "can":
+                    if not project.toolhead.canbus_uuid:
+                        report.add(
+                            severity="blocking",
+                            code="TOOLHEAD_CANBUS_UUID_REQUIRED",
+                            message="CAN toolhead board is enabled but canbus_uuid is empty.",
+                            field="toolhead.canbus_uuid",
+                        )
+                elif project.toolhead.canbus_uuid:
+                    report.add(
+                        severity="warning",
+                        code="TOOLHEAD_CANBUS_UUID_IGNORED",
+                        message="USB toolhead board selected; canbus_uuid value will be ignored.",
+                        field="toolhead.canbus_uuid",
+                    )
         elif project.toolhead.board or project.toolhead.canbus_uuid:
             report.add(
                 severity="warning",

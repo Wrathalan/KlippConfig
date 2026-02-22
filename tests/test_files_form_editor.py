@@ -8,11 +8,20 @@ from PySide6.QtWidgets import QFileDialog
 from app.ui.main_window import MainWindow
 
 
+def _select_default_voron_preset(window: MainWindow) -> None:
+    preset_index = window.preset_combo.findData(MainWindow.DEFAULT_VORON_PRESET_ID)
+    if preset_index < 0 and window.preset_combo.count() > 1:
+        preset_index = 1
+    if preset_index >= 0:
+        window.preset_combo.setCurrentIndex(preset_index)
+
+
 def test_generated_cfg_file_builds_form_and_applies_changes(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    _select_default_voron_preset(window)
     qtbot.waitUntil(lambda: window.current_pack is not None)
 
     items = window.generated_file_list.findItems("printer.cfg", Qt.MatchFlag.MatchExactly)
