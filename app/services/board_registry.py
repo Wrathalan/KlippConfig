@@ -401,8 +401,9 @@ TOOLHEAD_BOARD_REGISTRY: dict[str, BoardProfile] = {
     "btt_ebb42_v1_2": _toolhead_profile("BTT EBB42 v1.2", "stm32g0b1xx"),
     "btt_ebb_sb2209_2240": _toolhead_profile("BTT EBB SB2209/SB2240", "rp2040"),
     "btt_ebb2240_v1_0": _toolhead_profile("BTT EBB2240 v1.0", "rp2040"),
-    "ldo_nitehawk_sb": _toolhead_profile("LDO Nitehawk SB", "rp2040"),
-    "ldo_nitehawk_36": _toolhead_profile("LDO Nitehawk 36", "rp2040"),
+    # Nitehawk boards are commonly deployed over USB serial in working Voron configs.
+    "ldo_nitehawk_sb": _toolhead_profile("LDO Nitehawk SB", "rp2040", transport="usb"),
+    "ldo_nitehawk_36": _toolhead_profile("LDO Nitehawk 36", "rp2040", transport="usb"),
     "mellow_fly_sht36_v2": _toolhead_profile("Mellow FLY-SHT36 v2", "stm32f072xb"),
     "mellow_fly_sht42_v2": _toolhead_profile("Mellow FLY-SHT42 v2", "stm32f072xb"),
     "fysetc_sb_can_2040": _toolhead_profile("FYSETC SB CAN 2040", "rp2040"),
@@ -410,14 +411,6 @@ TOOLHEAD_BOARD_REGISTRY: dict[str, BoardProfile] = {
 
 
 BUILTIN_ADDON_REGISTRY: dict[str, AddonProfile] = {
-    "afc": AddonProfile(
-        id="afc",
-        label="AFC",
-        template="addons/afc.cfg.j2",
-        description="Automated Filament Changer baseline integration scaffold.",
-        multi_material=False,
-        recommends_toolhead=True,
-    ),
     "ams_lite": AddonProfile(
         id="ams_lite",
         label="AMS Lite",

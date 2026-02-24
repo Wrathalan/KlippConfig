@@ -1,4 +1,7 @@
+from collections import OrderedDict
+
 from app.domain.models import ProjectConfig
+from app.domain.models import RenderedPack
 from app.services.preset_catalog import PresetCatalogService
 from app.services.renderer import ConfigRenderService
 from app.services.validator import ValidationService
@@ -255,3 +258,93 @@ def test_led_enabled_requires_pin() -> None:
     report = validator.validate_project(project, preset)
     assert report.has_blocking
     assert any(f.code == "LED_PIN_REQUIRED" for f in report.findings)
+
+
+def test_validate_rendered_flags_cfg_syntax_defects_as_blocking() -> None:
+    validator = ValidationService()
+    pack = RenderedPack(
+        files=OrderedDict(
+            {
+                "printer.cfg": (
+                    "[include mcu.cfg]\n"
+                    "[include board_pins.cfg]\n"
+                    "[include motion.cfg]\n"
+                    "[include thermal.cfg]\n"
+                    "[include input_shaper.cfg]\n\n"
+                    "[printer]\n"
+                    "kinematics: corexy\n"
+                    "max_velocity: 300\n"
+                    "max_accel: 3000\n"
+                    "square_corner_velocity: 5.0\n"
+                ),
+                "mcu.cfg": "[mcu]\nserial: /dev/serial/by-id/test\n",
+                "board_pins.cfg": "[board_pins mainboard]\naliases:\n  stepper_x_step=PF13\n",
+                "motion.cfg": (
+                    "[stepper_z]\n"
+                    "endstop_pin: probe:z_virtual_endstopposition_max: 310\n"
+                ),
+                "thermal.cfg": "[extruder]\nheater_pin: PA2\nsensor_pin: PF4\nsensor_type: Generic 3950\n",
+                "input_shaper.cfg": "[input_shaper]\nshaper_type_x: mzv\nshaper_freq_x: 45.0\n",
+                "BOARD-LAYOUT.md": "layout\n",
+                "README-next-steps.md": "next\n",
+                "CALIBRATION-CHECKLIST.md": "checklist\n",
+            }
+        )
+    )
+
+    report = validator.validate_rendered(pack)
+    assert report.has_blocking
+    assert any(f.code == "RENDER_CFG_SYNTAX" for f in report.findings)
+
+
+def test_source_tree_layout_renders_from_section_map() -> None:
+    catalog = PresetCatalogService()
+    renderer = ConfigRenderService()
+    preset = catalog.load_preset("voron_2_4_350")
+    project = ProjectConfig.model_validate(
+        {
+            **_base_project(
+                preset.id,
+                preset.supported_boards[0],
+                preset.build_volume.x,
+                preset.build_volume.y,
+                preset.build_volume.z,
+            ),
+            "output_layout": "source_tree",
+            "machine_attributes": {
+                "root_file": "config/printer.cfg",
+                "include_graph": {"config/printer.cfg": ["config/nhk.cfg"], "config/nhk.cfg": []},
+                "printer_limits": {
+                    "max_velocity": 300.0,
+                    "max_accel": 3000.0,
+                    "max_z_velocity": None,
+                    "max_z_accel": None,
+                    "square_corner_velocity": 5.0,
+                },
+                "mcu_map": {},
+                "stepper_sections": {},
+                "driver_sections": {},
+                "probe_sections": {},
+                "leveling_sections": {},
+                "thermal_sections": {},
+                "fan_sections": {},
+                "sensor_sections": {},
+                "resonance_sections": {},
+            },
+            "section_map": {
+                "config/printer.cfg": {
+                    "include nhk.cfg": {},
+                    "printer": {"kinematics": "corexy", "max_velocity": "300", "max_accel": "3000", "square_corner_velocity": "5.0"},
+                },
+                "config/nhk.cfg": {
+                    "mcu nhk": {"serial": "/dev/serial/by-id/usb-Klipper_rp2040_TEST-if00"}
+                },
+            },
+        }
+    )
+
+    pack = renderer.render(project, preset)
+    assert pack.metadata.get("layout") == "source_tree"
+    assert "config/printer.cfg" in pack.files
+    assert "config/nhk.cfg" in pack.files
+    assert "[include nhk.cfg]" in pack.files["config/printer.cfg"]

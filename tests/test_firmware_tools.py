@@ -44,6 +44,35 @@ def test_validate_cfg_reports_blocking_and_warnings() -> None:
     assert "CFG_EQUALS_STYLE" in codes
 
 
+def test_validate_cfg_accepts_numeric_values_with_inline_comments() -> None:
+    service = FirmwareToolsService()
+    source = (
+        "[printer]\n"
+        "kinematics: corexy\n"
+        "max_velocity: 400\n"
+        "max_accel: 5000             # max 4000\n"
+        "max_z_velocity: 20          # max 15 for 12V\n"
+        "max_z_accel: 1000\n"
+        "square_corner_velocity: 5.0\n"
+    )
+
+    report = service.validate_cfg(source, source_label="printer.cfg")
+    codes = {finding.code for finding in report.findings}
+    assert "CFG_NUMERIC_INVALID" not in codes
+    assert "CFG_NUMERIC_NON_POSITIVE" not in codes
+
+
+def test_validate_cfg_detects_suspicious_concatenated_key_values() -> None:
+    service = FirmwareToolsService()
+    source = (
+        "[stepper_z]\n"
+        "endstop_pin: probe:z_virtual_endstopposition_max: 310\n"
+    )
+    report = service.validate_cfg(source, source_label="motion.cfg")
+    codes = {finding.code for finding in report.findings}
+    assert "CFG_POSSIBLE_CONCATENATED_KEY_VALUE" in codes
+
+
 def test_validate_cfg_handles_empty_content() -> None:
     service = FirmwareToolsService()
     report = service.validate_cfg("", source_label="empty.cfg")

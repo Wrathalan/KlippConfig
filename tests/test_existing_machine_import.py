@@ -46,8 +46,12 @@ def test_import_folder_detects_machine_traits_and_addons() -> None:
     assert profile.detected["preset_id"] == "voron_2_4_350"
     assert profile.detected["toolhead"]["board"] == "ldo_nitehawk_sb"
     addon_ids = {entry["id"] for entry in profile.detected["addons"]}
-    assert {"afc", "box_turtle", "kamp", "stealthburner_leds", "timelapse"}.issubset(addon_ids)
+    assert {"box_turtle", "kamp", "stealthburner_leds", "timelapse"}.issubset(addon_ids)
     assert "config/AFC/AFC.cfg" in profile.include_graph["config/printer.cfg"]
+    assert "machine_attributes" in profile.detected
+    assert profile.detected["machine_attributes"]["mcu_map"]["mcu"]["serial"]
+    assert "section_map" in profile.detected
+    assert "config/printer.cfg" in profile.detected["section_map"]
 
 
 def test_import_zip_matches_folder_core_signals(tmp_path) -> None:
@@ -81,3 +85,63 @@ def test_apply_suggestions_updates_project_with_auto_apply_fields() -> None:
     assert updated.toolhead.board == "ldo_nitehawk_sb"
     assert "box_turtle" in updated.addons
     assert "kamp" in updated.addons
+    assert updated.schema_version == 2
+    assert updated.output_layout == "source_tree"
+    assert updated.machine_attributes.root_file == "config/printer.cfg"
+    assert "config/printer.cfg" in updated.section_map
+
+
+def test_import_detects_and_applies_thermistors(tmp_path) -> None:
+    source = tmp_path / "machine"
+    config_dir = source / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "printer.cfg").write_text(
+        "[mcu]\n"
+        "serial: /dev/serial/by-id/usb-Klipper_stm32f446xx_TEST-if00\n\n"
+        "[printer]\n"
+        "kinematics: corexy\n\n"
+        "[stepper_x]\n"
+        "position_max: 350\n\n"
+        "[stepper_y]\n"
+        "position_max: 350\n\n"
+        "[stepper_z]\n"
+        "position_max: 310\n\n"
+        "[stepper_z1]\n"
+        "step_pin: PG4\n\n"
+        "[stepper_z2]\n"
+        "step_pin: PF9\n\n"
+        "[stepper_z3]\n"
+        "step_pin: PC13\n\n"
+        "[extruder]\n"
+        "sensor_type: ATC Semitec 104NT-4-R025H42G\n\n"
+        "[heater_bed]\n"
+        "sensor_type: Generic 3950\n\n"
+        "[quad_gantry_level]\n"
+        "gantry_corners:\n"
+        "  -60,-10\n"
+        "  410,420\n",
+        encoding="utf-8",
+    )
+
+    service = ExistingMachineImportService()
+    profile = service.import_folder(str(source))
+
+    assert profile.detected["thermistors"]["hotend"] == "ATC Semitec 104NT-4-R025H42G"
+    assert profile.detected["thermistors"]["bed"] == "Generic 3950"
+    assert any(
+        s.field == "thermistors.hotend"
+        and s.value == "ATC Semitec 104NT-4-R025H42G"
+        and s.auto_apply
+        for s in profile.suggestions
+    )
+    assert any(
+        s.field == "thermistors.bed"
+        and s.value == "Generic 3950"
+        and s.auto_apply
+        for s in profile.suggestions
+    )
+
+    project = ProjectConfig.model_validate(_base_project_payload())
+    updated = service.apply_suggestions(profile, project)
+    assert updated.thermistors.hotend == "ATC Semitec 104NT-4-R025H42G"
+    assert updated.thermistors.bed == "Generic 3950"

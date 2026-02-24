@@ -4,6 +4,8 @@
   "title": "KlippConfig Project Config",
   "type": "object",
   "required": [
+    "schema_version",
+    "output_layout",
     "preset_id",
     "board",
     "dimensions",
@@ -14,10 +16,21 @@
     "addons",
     "toolhead",
     "leds",
-    "advanced_overrides"
+    "advanced_overrides",
+    "machine_attributes",
+    "addon_configs",
+    "section_map"
   ],
   "additionalProperties": false,
   "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "output_layout": {
+      "type": "string",
+      "enum": ["source_tree", "modular"]
+    },
     "preset_id": {
       "type": "string",
       "minLength": 3
@@ -50,8 +63,8 @@
       "required": ["hotend", "bed"],
       "additionalProperties": false,
       "properties": {
-        "hotend": { "type": "string", "minLength": 3 },
-        "bed": { "type": "string", "minLength": 3 }
+        "hotend": { "type": "string", "minLength": 1 },
+        "bed": { "type": "string", "minLength": 1 }
       }
     },
     "motion_profile": {
@@ -112,10 +125,113 @@
     "advanced_overrides": {
       "type": "object",
       "additionalProperties": {
-        "type": ["string", "number", "boolean"]
+        "type": ["string", "number", "boolean", "null"]
+      }
+    },
+    "machine_attributes": {
+      "type": "object",
+      "required": [
+        "root_file",
+        "include_graph",
+        "printer_limits",
+        "mcu_map",
+        "stepper_sections",
+        "driver_sections",
+        "probe_sections",
+        "leveling_sections",
+        "thermal_sections",
+        "fan_sections",
+        "sensor_sections",
+        "resonance_sections"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "root_file": { "type": "string", "minLength": 1 },
+        "include_graph": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "printer_limits": {
+          "type": "object",
+          "required": [
+            "max_velocity",
+            "max_accel",
+            "max_z_velocity",
+            "max_z_accel",
+            "square_corner_velocity"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "max_velocity": { "type": "number", "exclusiveMinimum": 0 },
+            "max_accel": { "type": "number", "exclusiveMinimum": 0 },
+            "max_z_velocity": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "max_z_accel": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "square_corner_velocity": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "mcu_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["serial", "canbus_uuid", "restart_method"],
+            "additionalProperties": false,
+            "properties": {
+              "serial": { "type": ["string", "null"] },
+              "canbus_uuid": { "type": ["string", "null"] },
+              "restart_method": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "stepper_sections": { "$ref": "#/$defs/section_value_map" },
+        "driver_sections": { "$ref": "#/$defs/section_value_map" },
+        "probe_sections": { "$ref": "#/$defs/section_value_map" },
+        "leveling_sections": { "$ref": "#/$defs/section_value_map" },
+        "thermal_sections": { "$ref": "#/$defs/section_value_map" },
+        "fan_sections": { "$ref": "#/$defs/section_value_map" },
+        "sensor_sections": { "$ref": "#/$defs/section_value_map" },
+        "resonance_sections": { "$ref": "#/$defs/section_value_map" }
+      }
+    },
+    "addon_configs": {
+      "type": "object",
+      "required": ["kamp", "stealthburner_leds", "timelapse"],
+      "additionalProperties": false,
+      "properties": {
+        "kamp": { "$ref": "#/$defs/addon_package" },
+        "stealthburner_leds": { "$ref": "#/$defs/addon_package" },
+        "timelapse": { "$ref": "#/$defs/addon_package" }
+      }
+    },
+    "section_map": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/section_value_map"
+      }
+    }
+  },
+  "$defs": {
+    "section_value_map": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "type": "string" }
+      }
+    },
+    "addon_package": {
+      "type": "object",
+      "required": ["enabled", "include_files", "sections"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "include_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "sections": { "$ref": "#/$defs/section_value_map" }
       }
     }
   }
 }
-
-

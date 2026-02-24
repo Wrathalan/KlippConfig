@@ -14,6 +14,7 @@ from app.services.board_registry import (
     toolhead_board_transport,
 )
 from app.services.paths import bundle_template_dirs, templates_dir as default_templates_dir
+from app.services.config_graph import ConfigGraphService
 
 
 FALLBACK_PINS = {
@@ -58,6 +59,7 @@ class ConfigRenderService:
             keep_trailing_newline=True,
             undefined=StrictUndefined,
         )
+        self.graph_service = ConfigGraphService()
 
     @staticmethod
     def _coerce_override(value: Any, default: Any) -> Any:
@@ -142,7 +144,34 @@ class ConfigRenderService:
         )
         return self._render_template(template_name, context)
 
-    def render(self, project: ProjectConfig, preset: Preset) -> RenderedPack:
+    @staticmethod
+    def _render_section_map_file(sections: dict[str, dict[str, str]]) -> str:
+        lines: list[str] = []
+        for section_name, values in sections.items():
+            lines.append(f"[{section_name}]")
+            if isinstance(values, dict):
+                for key, value in values.items():
+                    rendered = str(value) if value is not None else ""
+                    if "\n" in rendered:
+                        value_lines = rendered.splitlines()
+                        first_line = value_lines[0] if value_lines else ""
+                        if first_line:
+                            lines.append(f"{key}: {first_line}")
+                        else:
+                            lines.append(f"{key}:")
+                        lines.extend(value_lines[1:])
+                    else:
+                        if rendered:
+                            lines.append(f"{key}: {rendered}")
+                        else:
+                            lines.append(f"{key}:")
+            lines.append("")
+
+        if not lines:
+            return ""
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _render_modular(self, project: ProjectConfig, preset: Preset) -> RenderedPack:
         context = self._compose_context(project, preset)
         files: OrderedDict[str, str] = OrderedDict()
         files["printer.cfg"] = self._render_template(preset.templates.printer, context)
@@ -183,5 +212,83 @@ class ConfigRenderService:
                 "toolhead_board": project.toolhead.board,
                 "leds_enabled": project.leds.enabled,
                 "addons": list(project.addons),
+                "layout": "modular",
             },
         )
+
+    def _render_source_tree(self, project: ProjectConfig, preset: Preset) -> RenderedPack:
+        context = self._compose_context(project, preset)
+        section_map = project.section_map if isinstance(project.section_map, dict) else {}
+        files: OrderedDict[str, str] = OrderedDict()
+        if not section_map:
+            modular = self._render_modular(project, preset)
+            for addon_name in sorted(project.addons):
+                addon_profile = get_addon_profile(addon_name)
+                if addon_profile is None or not addon_profile.package_templates:
+                    continue
+                printer_cfg = modular.files.get("printer.cfg", "")
+                for include_file in addon_profile.include_files:
+                    include_line = f"[include {include_file}]"
+                    if include_line not in printer_cfg:
+                        printer_cfg = printer_cfg.rstrip() + "\n" + include_line + "\n"
+                modular.files["printer.cfg"] = printer_cfg
+                for output_path, template_name in addon_profile.package_templates.items():
+                    modular.files[output_path] = self._render_template(template_name, context)
+            modular.metadata["layout"] = "source_tree"
+            modular.metadata["source_root_file"] = "printer.cfg"
+            return modular
+
+        include_graph = project.machine_attributes.include_graph
+        root_file = (project.machine_attributes.root_file or "printer.cfg").replace("\\", "/")
+        ordered_candidates: list[str] = []
+        if include_graph:
+            ordered_candidates.extend(self.graph_service.flatten_graph(include_graph, root_file))
+
+        ordered_paths: list[str] = []
+        seen: set[str] = set()
+        for candidate in ordered_candidates:
+            if candidate in section_map and candidate not in seen:
+                ordered_paths.append(candidate)
+                seen.add(candidate)
+        for candidate in section_map.keys():
+            if candidate not in seen:
+                ordered_paths.append(candidate)
+                seen.add(candidate)
+
+        for file_path in ordered_paths:
+            sections = section_map.get(file_path)
+            if not isinstance(sections, dict):
+                continue
+            files[file_path] = self._render_section_map_file(sections)
+
+        # Preserve existing operator docs in source-tree exports.
+        files["BOARD-LAYOUT.md"] = self._render_template("BOARD-LAYOUT.md.j2", context)
+        files["README-next-steps.md"] = self._render_template("README-next-steps.md.j2", context)
+        files["CALIBRATION-CHECKLIST.md"] = self._render_template(
+            "CALIBRATION-CHECKLIST.md.j2", context
+        )
+
+        return RenderedPack(
+            files=files,
+            metadata={
+                "preset_id": preset.id,
+                "preset_name": preset.name,
+                "board": project.board,
+                "toolhead_board": project.toolhead.board,
+                "leds_enabled": project.leds.enabled,
+                "addons": list(project.addons),
+                "layout": "source_tree",
+                "source_root_file": root_file,
+            },
+        )
+
+    def render(
+        self,
+        project: ProjectConfig,
+        preset: Preset,
+        layout: str | None = None,
+    ) -> RenderedPack:
+        selected_layout = (layout or getattr(project, "output_layout", "source_tree")).strip().lower()
+        if selected_layout == "modular":
+            return self._render_modular(project, preset)
+        return self._render_source_tree(project, preset)

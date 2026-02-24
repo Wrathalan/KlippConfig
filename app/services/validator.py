@@ -16,6 +16,7 @@ from app.services.board_registry import (
 )
 from app.services.paths import schemas_dir as default_schemas_dir
 from app.services.preset_catalog import PresetCatalogService
+from app.services.firmware_tools import FirmwareToolsService
 
 
 class ValidationService:
@@ -23,6 +24,7 @@ class ValidationService:
         schema_root = schema_root or default_schemas_dir()
         catalog = PresetCatalogService(schema_root=schema_root)
         self.project_schema_validator = Draft202012Validator(catalog.get_project_schema())
+        self.firmware_tools_service = FirmwareToolsService()
 
     @staticmethod
     def _as_reportable_path(path_parts: list[Any]) -> str:
@@ -259,17 +261,28 @@ class ValidationService:
 
     def validate_rendered(self, pack: RenderedPack) -> ValidationReport:
         report = ValidationReport()
+        layout = str(pack.metadata.get("layout") or "modular").strip().lower()
+        source_root_file = str(pack.metadata.get("source_root_file") or "printer.cfg").strip()
+
         required_files = [
-            "printer.cfg",
-            "mcu.cfg",
-            "board_pins.cfg",
-            "motion.cfg",
-            "thermal.cfg",
-            "input_shaper.cfg",
             "BOARD-LAYOUT.md",
             "README-next-steps.md",
             "CALIBRATION-CHECKLIST.md",
         ]
+        if layout == "source_tree":
+            required_files.append(source_root_file or "printer.cfg")
+        else:
+            required_files.extend(
+                [
+                    "printer.cfg",
+                    "mcu.cfg",
+                    "board_pins.cfg",
+                    "motion.cfg",
+                    "thermal.cfg",
+                    "input_shaper.cfg",
+                ]
+            )
+
         for file_name in required_files:
             if file_name not in pack.files:
                 report.add(
@@ -285,71 +298,119 @@ class ValidationService:
                     message=f"Output file '{file_name}' is empty.",
                 )
 
-        printer = pack.files.get("printer.cfg", "")
-        for include_name in ("mcu.cfg", "board_pins.cfg", "motion.cfg", "thermal.cfg", "input_shaper.cfg"):
-            include_line = f"[include {include_name}]"
-            if include_line not in printer:
+        if layout != "source_tree":
+            printer = pack.files.get("printer.cfg", "")
+            for include_name in (
+                "mcu.cfg",
+                "board_pins.cfg",
+                "motion.cfg",
+                "thermal.cfg",
+                "input_shaper.cfg",
+            ):
+                include_line = f"[include {include_name}]"
+                if include_line not in printer:
+                    report.add(
+                        severity="blocking",
+                        code="MISSING_INCLUDE",
+                        message=f"'printer.cfg' does not include '{include_name}'.",
+                        field="printer.cfg",
+                    )
+
+            if "macros.cfg" in pack.files and "[include macros.cfg]" not in printer:
                 report.add(
                     severity="blocking",
-                    code="MISSING_INCLUDE",
-                    message=f"'printer.cfg' does not include '{include_name}'.",
+                    code="MACRO_INCLUDE_MISSING",
+                    message="'macros.cfg' was generated but not included from 'printer.cfg'.",
                     field="printer.cfg",
                 )
 
-        if "macros.cfg" in pack.files and "[include macros.cfg]" not in printer:
-            report.add(
-                severity="blocking",
-                code="MACRO_INCLUDE_MISSING",
-                message="'macros.cfg' was generated but not included from 'printer.cfg'.",
-                field="printer.cfg",
-            )
+            if "toolhead.cfg" in pack.files and "[include toolhead.cfg]" not in printer:
+                report.add(
+                    severity="blocking",
+                    code="TOOLHEAD_INCLUDE_MISSING",
+                    message="'toolhead.cfg' was generated but not included from 'printer.cfg'.",
+                    field="printer.cfg",
+                )
 
-        if "toolhead.cfg" in pack.files and "[include toolhead.cfg]" not in printer:
-            report.add(
-                severity="blocking",
-                code="TOOLHEAD_INCLUDE_MISSING",
-                message="'toolhead.cfg' was generated but not included from 'printer.cfg'.",
-                field="printer.cfg",
-            )
+            if "[include toolhead.cfg]" in printer and "toolhead.cfg" not in pack.files:
+                report.add(
+                    severity="blocking",
+                    code="TOOLHEAD_FILE_MISSING",
+                    message="'printer.cfg' includes toolhead.cfg, but the file was not generated.",
+                    field="printer.cfg",
+                )
 
-        if "[include toolhead.cfg]" in printer and "toolhead.cfg" not in pack.files:
-            report.add(
-                severity="blocking",
-                code="TOOLHEAD_FILE_MISSING",
-                message="'printer.cfg' includes toolhead.cfg, but the file was not generated.",
-                field="printer.cfg",
-            )
+            if "toolhead_pins.cfg" in pack.files and "[include toolhead_pins.cfg]" not in printer:
+                report.add(
+                    severity="blocking",
+                    code="TOOLHEAD_PINS_INCLUDE_MISSING",
+                    message="'toolhead_pins.cfg' was generated but not included from 'printer.cfg'.",
+                    field="printer.cfg",
+                )
 
-        if "toolhead_pins.cfg" in pack.files and "[include toolhead_pins.cfg]" not in printer:
-            report.add(
-                severity="blocking",
-                code="TOOLHEAD_PINS_INCLUDE_MISSING",
-                message="'toolhead_pins.cfg' was generated but not included from 'printer.cfg'.",
-                field="printer.cfg",
-            )
+            if "addons.cfg" in pack.files and "[include addons.cfg]" not in printer:
+                report.add(
+                    severity="blocking",
+                    code="ADDONS_INCLUDE_MISSING",
+                    message="'addons.cfg' was generated but not included from 'printer.cfg'.",
+                    field="printer.cfg",
+                )
 
-        if "addons.cfg" in pack.files and "[include addons.cfg]" not in printer:
-            report.add(
-                severity="blocking",
-                code="ADDONS_INCLUDE_MISSING",
-                message="'addons.cfg' was generated but not included from 'printer.cfg'.",
-                field="printer.cfg",
-            )
+            if "leds.cfg" in pack.files and "[include leds.cfg]" not in printer:
+                report.add(
+                    severity="blocking",
+                    code="LEDS_INCLUDE_MISSING",
+                    message="'leds.cfg' was generated but not included from 'printer.cfg'.",
+                    field="printer.cfg",
+                )
 
-        if "leds.cfg" in pack.files and "[include leds.cfg]" not in printer:
-            report.add(
-                severity="blocking",
-                code="LEDS_INCLUDE_MISSING",
-                message="'leds.cfg' was generated but not included from 'printer.cfg'.",
-                field="printer.cfg",
-            )
+            if "[include leds.cfg]" in printer and "leds.cfg" not in pack.files:
+                report.add(
+                    severity="blocking",
+                    code="LEDS_FILE_MISSING",
+                    message="'printer.cfg' includes leds.cfg, but the file was not generated.",
+                    field="printer.cfg",
+                )
+        else:
+            cfg_files = {
+                name: content
+                for name, content in pack.files.items()
+                if name.lower().endswith(".cfg")
+            }
+            if source_root_file and source_root_file in cfg_files:
+                graph_report = self.firmware_tools_service.validate_graph(
+                    cfg_files,
+                    source_root_file,
+                )
+                for finding in graph_report.findings:
+                    report.add(
+                        severity=finding.severity,
+                        code=f"RENDER_GRAPH_{finding.code}",
+                        message=finding.message,
+                        field=finding.field,
+                    )
 
-        if "[include leds.cfg]" in printer and "leds.cfg" not in pack.files:
-            report.add(
-                severity="blocking",
-                code="LEDS_FILE_MISSING",
-                message="'printer.cfg' includes leds.cfg, but the file was not generated.",
-                field="printer.cfg",
+        for file_name, content in pack.files.items():
+            if not file_name.lower().endswith(".cfg"):
+                continue
+            cfg_report = self.firmware_tools_service.validate_cfg(
+                content,
+                source_label=file_name,
+                role="auto",
             )
+            for finding in cfg_report.findings:
+                if (
+                    finding.severity == "blocking"
+                    or finding.code == "CFG_POSSIBLE_CONCATENATED_KEY_VALUE"
+                ):
+                    detail = finding.message
+                    if finding.field:
+                        detail = f"{detail} ({finding.field})"
+                    report.add(
+                        severity="blocking",
+                        code="RENDER_CFG_SYNTAX",
+                        message=f"{file_name}: {detail}",
+                        field=file_name,
+                    )
 
         return report

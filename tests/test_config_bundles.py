@@ -72,6 +72,9 @@ def test_bundle_catalog_loads_board_toolhead_and_addon_profiles(tmp_path) -> Non
             "label": "My Addon",
             "template": "addons/my_addon.cfg.j2",
             "supported_families": ["voron"],
+            "include_files": ["my_addon.cfg"],
+            "package_templates": {"my_addon.cfg": "addons/my_addon.cfg.j2"},
+            "learned": True,
         },
     )
 
@@ -87,6 +90,9 @@ def test_bundle_catalog_loads_board_toolhead_and_addon_profiles(tmp_path) -> Non
     assert toolhead_boards["my_toolhead"].mcu == "rp2040"
     assert "my_addon" in addons
     assert addons["my_addon"].template == "addons/my_addon.cfg.j2"
+    assert addons["my_addon"].include_files == ["my_addon.cfg"]
+    assert addons["my_addon"].package_templates["my_addon.cfg"] == "addons/my_addon.cfg.j2"
+    assert addons["my_addon"].learned is True
 
 
 def test_invalid_bundle_files_are_ignored(tmp_path) -> None:
@@ -198,3 +204,10 @@ def test_usb_toolhead_bundle_renders_serial_and_skips_can_uuid_requirement(
     assert "toolhead.cfg" in pack.files
     assert "serial: /dev/serial/by-id/usb-USB_Toolhead" in pack.files["toolhead.cfg"]
     assert "canbus_uuid:" not in pack.files["toolhead.cfg"]
+
+
+def test_builtin_ldo_nitehawk_toolheads_are_classified_as_usb() -> None:
+    assert board_registry.toolhead_board_transport("ldo_nitehawk_sb") == "usb"
+    assert board_registry.toolhead_board_transport("ldo_nitehawk_36") == "usb"
+    assert "ldo_nitehawk_sb" in board_registry.list_usb_toolhead_boards()
+    assert "ldo_nitehawk_36" in board_registry.list_usb_toolhead_boards()

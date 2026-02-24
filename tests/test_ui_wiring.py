@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from PySide6.QtWidgets import QGroupBox
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QGroupBox
 
 from app.ui.main_window import MainWindow
 from app.services.saved_connections import SavedConnectionService
@@ -87,6 +88,13 @@ def _select_default_voron_preset(window: MainWindow) -> None:
         window.preset_combo.setCurrentIndex(preset_index)
 
 
+def _temp_settings(tmp_path: Path, name: str = "ui_settings.ini") -> QSettings:
+    settings = QSettings(str(tmp_path / name), QSettings.Format.IniFormat)
+    settings.clear()
+    settings.sync()
+    return settings
+
+
 def test_tabs_hide_advanced_and_keep_files(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
@@ -111,6 +119,126 @@ def test_tabs_hide_advanced_and_keep_files(qtbot) -> None:
     assert hasattr(window, "export_zip_action")
     assert hasattr(window, "import_existing_machine_action")
     assert hasattr(window, "help_about_action")
+    assert window.tabs.tabBar().isVisible() is False
+    assert not hasattr(window, "view_advanced_mode_action")
+
+
+def test_files_experiment_flag_defaults_off(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path)
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert window._is_files_experiment_enabled() is False
+    assert window.view_files_experiment_action.isChecked() is False
+    assert window.app_state_store.snapshot().ui.files_ui_variant == "classic"
+
+
+def test_files_experiment_toggle_persists_across_restart(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path)
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window._set_files_experiment_enabled(True)
+    assert window._is_files_experiment_enabled() is True
+    assert window.app_state_store.snapshot().ui.files_ui_variant == "material_v1"
+    window.close()
+
+    restarted = MainWindow(app_settings=settings)
+    qtbot.addWidget(restarted)
+    restarted.show()
+    qtbot.waitUntil(lambda: restarted.preset_combo.count() > 0)
+
+    assert restarted._is_files_experiment_enabled() is True
+    assert restarted.view_files_experiment_action.isChecked() is True
+    assert restarted.app_state_store.snapshot().ui.files_ui_variant == "material_v1"
+
+
+def test_files_experiment_builder_selected_when_enabled(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path)
+    settings.setValue(MainWindow.FILES_EXPERIMENT_SETTING_KEY, True)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert window.files_tab.objectName() == "files_tab_material_v1"
+    assert hasattr(window, "generated_file_list")
+    assert hasattr(window, "file_view_tabs")
+    assert hasattr(window, "validation_table")
+    assert hasattr(window, "cfg_tools_status_label")
+    assert hasattr(window, "files_primary_status_chip")
+    assert hasattr(window, "files_blocking_chip")
+    assert hasattr(window, "files_warning_chip")
+    assert hasattr(window, "files_dirty_chip")
+
+
+def test_files_experiment_stylesheet_applies_in_dark_and_light(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path)
+    settings.setValue(MainWindow.FILES_EXPERIMENT_SETTING_KEY, True)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    app = QApplication.instance()
+    assert app is not None
+
+    window._apply_theme_mode("dark")
+    dark_stylesheet = app.styleSheet()
+    assert "#files_tab_material_v1" in dark_stylesheet
+    assert "#1f1f1f" in dark_stylesheet
+
+    window._apply_theme_mode("light")
+    light_stylesheet = app.styleSheet()
+    assert "#files_tab_material_v1" in light_stylesheet
+    assert "#f4f6fb" in light_stylesheet
+
+
+def test_files_experiment_preserves_file_selection_and_raw_form_modes(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path)
+    settings.setValue(MainWindow.FILES_EXPERIMENT_SETTING_KEY, True)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    _select_first_mainboard(window)
+
+    qtbot.waitUntil(lambda: window.generated_file_list.count() > 0)
+    window.generated_file_list.setCurrentRow(0)
+    qtbot.waitUntil(lambda: bool(window.file_preview.toPlainText().strip()))
+
+    original_index = window.file_view_tabs.currentIndex()
+    window._toggle_raw_form_mode()
+
+    assert window.file_view_tabs.currentIndex() != original_index
+    assert window.files_breadcrumbs_label.text().startswith("Path:")
+    assert window.files_primary_status_chip.text().strip() != ""
+
+
+def test_files_experiment_uses_plain_english_validation_status_copy(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path)
+    settings.setValue(MainWindow.FILES_EXPERIMENT_SETTING_KEY, True)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    _select_first_mainboard(window)
+    qtbot.waitUntil(lambda: window.generated_file_list.count() > 0)
+
+    status_text = window.cfg_tools_status_label.text()
+    assert status_text.startswith(("Looks good:", "Action needed:", "Heads up:"))
 
 
 def test_vendor_field_defaults_to_placeholder_and_expected_options(qtbot) -> None:
@@ -123,6 +251,20 @@ def test_vendor_field_defaults_to_placeholder_and_expected_options(qtbot) -> Non
     assert labels == ["None", "custom printer", "Voron"]
     assert window.vendor_combo.currentIndex() == 0
     assert window.vendor_combo.currentText() == "None"
+
+
+def test_generate_tab_header_row_stays_top_aligned_on_tall_window(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window._on_shell_route_selected("generate")
+    window.resize(1800, 1200)
+    qtbot.wait(50)
+
+    tab_height = max(1, window.wizard_tab.height())
+    assert window.render_validate_btn.y() < (tab_height // 5)
 
 
 def test_preset_defaults_to_none_and_switches_for_voron_vendor(qtbot) -> None:
@@ -370,25 +512,27 @@ def test_led_controls_update_project(qtbot) -> None:
     assert project.leds.initial_blue == 0.1
 
 
-def test_live_conflict_alert_appears_and_clears(qtbot) -> None:
+def test_live_conflict_toast_appears_and_conflicts_clear(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
     _select_first_mainboard(window)
     qtbot.waitUntil(lambda: not window.current_report.has_blocking)
+    assert not hasattr(window, "conflict_alert_label")
 
     _select_first_can_toolhead_board(window)
 
     qtbot.waitUntil(lambda: window.current_report.has_blocking)
-    assert window.conflict_alert_label.isVisible()
-    assert "Blocking conflicts" in window.conflict_alert_label.text()
+    qtbot.waitUntil(
+        lambda: window.toast_notification.isVisible() and "Please fix" in window.toast_notification.text()
+    )
 
     if window.toolhead_can_board_combo.currentData() is not None:
         window.toolhead_canbus_uuid_edit.setText("1234abcd5678efgh")
 
     qtbot.waitUntil(lambda: not window.current_report.has_blocking)
-    assert not window.conflict_alert_label.isVisible()
+    assert window._last_blocking_alert_snapshot == ()
 
 
 def test_footer_device_health_indicator_updates_from_ssh_connect(qtbot) -> None:
@@ -427,13 +571,12 @@ def test_files_sections_collapsed_by_default_and_issue_notice(qtbot) -> None:
 
     assert window.overrides_section_toggle.isChecked() is False
     assert window.validation_section_toggle.isChecked() is False
-    assert window.files_validation_notice_label.isHidden() is True
+    assert not hasattr(window, "files_validation_notice_label")
 
-    _select_first_can_toolhead_board(window)
-    qtbot.waitUntil(lambda: window.current_report.has_blocking)
+    window._update_validation_issue_notification(0, 2)
+    qtbot.waitUntil(lambda: window.toast_notification.isVisible() and "Heads up:" in window.toast_notification.text())
 
-    assert window.files_validation_notice_label.isHidden() is False
-    assert "Validation unresolved" in window.files_validation_notice_label.text()
+    assert "we found 2 warnings" in window.toast_notification.text()
     assert "Validation Findings (" in window.validation_section_toggle.text()
 
 
@@ -880,17 +1023,119 @@ def test_persistent_preview_removed_from_main_layout(qtbot) -> None:
     assert not hasattr(window, "preview_toggle_action")
 
 
-def test_printer_connection_actions_available_in_tools_menu(qtbot) -> None:
+def test_command_bar_printer_and_tools_actions_match_expected_labels(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
+    assert window.printer_upload_action.text() == "Upload Current"
     assert window.tools_guided_component_setup_action.text() == "Guided Component Setup..."
+    assert window.tools_learn_addons_action.text() == "Learn Add-ons from Imported Config"
     assert window.tools_connect_menu.title() == "Connect"
     assert window.tools_connect_action.text() == "Current SSH Fields"
-    assert window.tools_open_remote_action.text() == "Open Remote File"
+    assert window.tools_open_remote_action.text() == "Open Remote Config"
     assert window.tools_explore_config_action.text() == "Explore Config Directory"
     assert window.tools_deploy_action.text() == "Deploy Generated Pack"
-    assert window.tools_scan_printers_action.text() == "Scan for Printers"
+    assert window.tools_scan_printers_action.text() == "Scan Network"
     assert window.tools_use_selected_host_action.text() == "Use Selected Host"
+
+
+def test_command_bar_primary_shortcuts_are_wired(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert window.printer_connect_action.shortcut().toString() == "Ctrl+Shift+C"
+    assert window.configuration_validate_action.shortcut().toString() == "Ctrl+Shift+V"
+    assert window.configuration_compile_action.shortcut().toString() == "Ctrl+Shift+G"
+    assert window.printer_upload_action.shortcut().toString() == "Ctrl+Shift+U"
+    assert window.printer_restart_klipper_action.shortcut().toString() == "Ctrl+Shift+R"
+
+
+def test_left_nav_has_no_legacy_route(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    labels = [window.left_nav_scaffold.item(index).text() for index in range(window.left_nav_scaffold.count())]
+    assert "Legacy" not in labels
+    assert "Home" in labels
+
+
+def test_duplicate_primary_buttons_removed_from_views(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert not hasattr(window, "modify_validate_btn")
+    assert not hasattr(window, "modify_upload_btn")
+    assert not hasattr(window, "modify_test_restart_btn")
+    assert not hasattr(window, "validate_cfg_btn")
+    assert not hasattr(window, "manage_validate_file_btn")
+
+
+def test_command_bar_primary_actions_dispatch_by_route(qtbot, monkeypatch) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    calls: list[str] = []
+    monkeypatch.setattr(window, "_validate_current_cfg_file", lambda: calls.append("files_validate"))
+    monkeypatch.setattr(window, "_modify_validate_current_file", lambda: calls.append("modify_validate"))
+    monkeypatch.setattr(window, "_manage_validate_current_file", lambda: calls.append("manage_validate"))
+    monkeypatch.setattr(window, "_deploy_generated_pack", lambda: calls.append("deploy_generated"))
+    monkeypatch.setattr(window, "_modify_upload_current_file", lambda: calls.append("modify_upload"))
+    monkeypatch.setattr(window, "_manage_save_current_file", lambda: calls.append("manage_save"))
+    monkeypatch.setattr(window, "_restart_klipper_service", lambda: calls.append("restart_klipper"))
+    monkeypatch.setattr(window, "_modify_test_restart", lambda: calls.append("modify_restart"))
+
+    window._on_shell_route_selected("edit_config")
+    window._validate_current_context()
+    window._upload_current_context()
+    window._restart_current_context()
+
+    window._on_shell_route_selected("backups")
+    window._validate_current_context()
+    window._upload_current_context()
+    window._restart_current_context()
+
+    window._on_shell_route_selected("generate")
+    window._validate_current_context()
+    window._upload_current_context()
+    window._restart_current_context()
+
+    assert calls == [
+        "modify_validate",
+        "modify_upload",
+        "modify_restart",
+        "manage_validate",
+        "manage_save",
+        "restart_klipper",
+        "files_validate",
+        "deploy_generated",
+        "restart_klipper",
+    ]
+
+
+def test_machine_attribute_and_addon_detail_views_update_in_configuration(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    _select_first_mainboard(window)
+    qtbot.waitUntil(lambda: window.current_project is not None)
+
+    assert hasattr(window, "machine_attr_mcu_view")
+    assert hasattr(window, "machine_attr_motion_view")
+    assert hasattr(window, "machine_attr_probe_view")
+    assert hasattr(window, "machine_attr_thermal_view")
+    assert hasattr(window, "addon_package_details_view")
+
+    assert window.machine_attr_mcu_view.toPlainText().strip() != ""
+    assert "No add-ons enabled" in window.addon_package_details_view.toPlainText()

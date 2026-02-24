@@ -26,7 +26,7 @@ dir_pin: {{ pins.stepper_z_dir }}
 enable_pin: {{ pins.stepper_z_enable }}
 microsteps: {{ override("motion.stepper_z_microsteps", 16) }}
 rotation_distance: {{ override("motion.stepper_z_rotation_distance", 8.0) }}
-endstop_pin: {% if project.probe.enabled %}probe:z_virtual_endstop{% else %}^PC15{% endif %}
+endstop_pin: {{ "probe:z_virtual_endstop" if project.probe.enabled else "^PC15" }}
 position_max: {{ project.dimensions.z }}
 position_min: -2
 homing_speed: {{ override("motion.z_homing_speed", 10) }}
@@ -49,4 +49,3 @@ z_offset: {{ override("probe.z_offset", 0.0) }}
 speed: {{ override("probe.speed", 5.0) }}
 samples: {{ override("probe.samples", 2) }}
 {% endif %}
-

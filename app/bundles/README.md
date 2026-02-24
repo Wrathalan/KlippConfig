@@ -78,13 +78,30 @@ Later roots override earlier ones by matching `id`.
   "description": "Basic heater/fan scaffold for enclosed builds.",
   "multi_material": false,
   "recommends_toolhead": false,
-  "supported_families": ["voron"]
+  "supported_families": ["voron"],
+  "include_files": ["chamber_heater.cfg"],
+  "package_templates": {
+    "chamber_heater.cfg": "addons/chamber_heater.cfg.j2"
+  },
+  "output_files": ["chamber_heater.cfg"],
+  "learned": false
 }
 ```
 
 Add-on templates are loaded from bundle `templates` folders, for example:
 
 - `%APPDATA%\KlippConfig\bundles\templates\addons\chamber_heater.cfg.j2`
+
+For learned/source-tree add-on packages:
+
+- `include_files` defines include targets that should be injected into root config output.
+- `package_templates` maps output config path -> template path.
+- `output_files` is optional metadata for UI/reporting.
+- `learned: true` marks bundles generated from imported machine configs.
+
+You can generate these automatically via:
+
+- `Tools -> Learn Add-ons from Imported Config`
 
 ## Notes
 

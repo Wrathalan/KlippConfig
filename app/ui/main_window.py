@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
-from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtCore import QSettings, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -64,6 +65,8 @@ from app.services.board_registry import (
     refresh_bundle_catalog,
     toolhead_board_transport,
 )
+from app.services.addon_bundle_learning import AddonBundleLearningService
+from app.services.action_log import ActionLogService
 from app.services.exporter import ExportService
 from app.services.existing_machine_import import (
     ExistingMachineImportError,
@@ -86,6 +89,10 @@ from app.services.saved_machine_profiles import SavedMachineProfileService
 from app.services.ssh_deploy import SSHDeployError, SSHDeployService
 from app.services.ui_scaling import UIScaleMode, UIScalingService
 from app.services.validator import ValidationService
+from app.services.parity import ParityService
+from app.ui.app_state import AppStateStore
+from app.ui.design_tokens import build_base_stylesheet, build_files_material_stylesheet
+from app.ui.shell_scaffold import BottomStatusBar, LeftNav, RightContextPanel, RouteDefinition
 from app.version import __version__
 
 try:
@@ -181,6 +188,43 @@ class MainWindow(QMainWindow):
         ("125", "125%"),
         ("150", "150%"),
     )
+    FILES_EXPERIMENT_SETTING_KEY = "ui/experiments/files_material_v1_enabled"
+    THEME_STYLESHEET_DARK = """
+QWidget {
+    background-color: #1f1f1f;
+    color: #ececec;
+}
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTreeWidget, QTableWidget, QTabWidget::pane {
+    background-color: #2a2a2a;
+    color: #ececec;
+    border: 1px solid #454545;
+}
+QPushButton, QToolButton {
+    background-color: #343434;
+    color: #f0f0f0;
+    border: 1px solid #4c4c4c;
+    padding: 4px 8px;
+}
+QPushButton:hover, QToolButton:hover {
+    background-color: #3d3d3d;
+}
+QMenuBar, QMenu {
+    background-color: #252525;
+    color: #ececec;
+}
+QMenu::item:selected {
+    background-color: #3a3a3a;
+}
+QGroupBox {
+    border: 1px solid #4a4a4a;
+    margin-top: 8px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px 0 4px;
+}
+"""
 
     def __init__(
         self,
@@ -197,8 +241,12 @@ class MainWindow(QMainWindow):
         self.catalog_service = PresetCatalogService()
         self.render_service = ConfigRenderService()
         self.validation_service = ValidationService()
+        self.parity_service = ParityService()
         self.firmware_tools_service = FirmwareToolsService()
         self.existing_machine_import_service = ExistingMachineImportService()
+        self.addon_bundle_learning_service = AddonBundleLearningService()
+        self.action_log_service = ActionLogService()
+        self.app_state_store = AppStateStore()
         self.export_service = ExportService()
         self.project_store = ProjectStoreService()
         self.saved_connection_service = saved_connection_service or SavedConnectionService()
@@ -212,6 +260,15 @@ class MainWindow(QMainWindow):
         self.ui_scale_actions: dict[UIScaleMode, QAction] = {}
         self.ui_scale_action_group: QActionGroup | None = None
         self.addon_options = self._build_addon_options()
+        self.ui_routes = [
+            RouteDefinition("home", "Home", active=True),
+            RouteDefinition("connect", "Connect", active=True),
+            RouteDefinition("files", "Files", active=True),
+            RouteDefinition("edit_config", "Edit Config", active=True),
+            RouteDefinition("generate", "Generate", active=True),
+            RouteDefinition("deploy", "Deploy", active=True),
+            RouteDefinition("backups", "Backups", active=True),
+        ]
 
         self.presets_by_id: dict[str, Preset] = {}
         self.current_preset: Preset | None = None
@@ -236,6 +293,7 @@ class MainWindow(QMainWindow):
         self.files_current_generated_name: str | None = None
         self.cfg_form_editors: list[dict[str, Any]] = []
         self._last_blocking_alert_snapshot: tuple[str, ...] = ()
+        self._last_warning_toast_snapshot: tuple[int, int] = (0, 0)
         self.device_connected = False
         self.manage_control_windows: list[QMainWindow] = []
         self.preview_content = ""
@@ -254,8 +312,20 @@ class MainWindow(QMainWindow):
         self.preview_connected_printer_name: str | None = None
         self.preview_connected_host: str | None = None
         self.about_window: QMainWindow | None = None
+        self.current_project_path: str | None = None
+        raw_theme = str(self.app_settings.value("ui/theme_mode", "dark") or "dark").strip().lower()
+        self.theme_mode = raw_theme if raw_theme in {"dark", "light"} else "dark"
+        self.files_experiment_enabled = self._settings_bool(
+            self.FILES_EXPERIMENT_SETTING_KEY,
+            False,
+        )
 
         self._build_ui()
+        self.app_state_store.update_ui(
+            active_route="home",
+            legacy_visible=True,
+            files_ui_variant=("material_v1" if self.files_experiment_enabled else "classic"),
+        )
         self._load_presets()
         self._render_and_validate()
 
@@ -274,6 +344,34 @@ class MainWindow(QMainWindow):
             return default
         return max(60, value)
 
+    def _is_files_experiment_enabled(self) -> bool:
+        return bool(getattr(self, "files_experiment_enabled", False))
+
+    def _set_files_experiment_enabled(self, enabled: bool) -> None:
+        self.files_experiment_enabled = bool(enabled)
+        self.app_settings.setValue(self.FILES_EXPERIMENT_SETTING_KEY, self.files_experiment_enabled)
+        self.app_settings.sync()
+        self.action_log_service.log_event(
+            "files_experiment_toggle",
+            enabled=self.files_experiment_enabled,
+        )
+        if hasattr(self, "view_files_experiment_action"):
+            self.view_files_experiment_action.blockSignals(True)
+            self.view_files_experiment_action.setChecked(self.files_experiment_enabled)
+            self.view_files_experiment_action.blockSignals(False)
+        self.app_state_store.update_ui(
+            files_ui_variant=("material_v1" if self.files_experiment_enabled else "classic")
+        )
+        self._apply_theme_mode(self.theme_mode, persist=False)
+        self.statusBar().showMessage(
+            (
+                "Files UI v1 enabled. Restart to rebuild the Files screen."
+                if self.files_experiment_enabled
+                else "Files UI v1 disabled. Restart to return to the classic Files screen."
+            ),
+            3500,
+        )
+
     def _build_addon_options(self) -> dict[str, str]:
         options: list[tuple[str, str]] = []
         for addon_id in list_addons():
@@ -285,20 +383,36 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self._build_menu()
+        self.top_command_bar = self.menuBar()
 
         root = QWidget(self)
         root_layout = QVBoxLayout(root)
-        self.conflict_alert_label = QLabel("", root)
-        self.conflict_alert_label.setWordWrap(True)
-        self.conflict_alert_label.setVisible(False)
-        root_layout.addWidget(self.conflict_alert_label)
+        self.toast_anchor = root
 
         self.tabs = QTabWidget(root)
-        root_layout.addWidget(self.tabs, 1)
+        self.left_nav_scaffold = LeftNav(root)
+        self.left_nav_scaffold.set_routes(self.ui_routes)
+        self.left_nav_scaffold.route_selected.connect(self._on_shell_route_selected)
+        self.right_context_panel = RightContextPanel(root)
+        self.bottom_status_bar = BottomStatusBar(root)
+        self.bottom_status_bar.setMinimumHeight(28)
+
+        shell_row = QHBoxLayout()
+        shell_row.setContentsMargins(0, 0, 0, 0)
+        shell_row.setSpacing(8)
+        shell_row.addWidget(self.left_nav_scaffold)
+        shell_row.addWidget(self.tabs, 1)
+        shell_row.addWidget(self.right_context_panel)
+        root_layout.addLayout(shell_row, 1)
+        root_layout.addWidget(self.bottom_status_bar)
 
         self.main_tab = self._build_main_tab()
         self.wizard_tab = self._build_wizard_tab()
-        self.files_tab = self._build_files_tab()
+        self.files_tab = (
+            self._build_files_tab_experimental()
+            if self._is_files_experiment_enabled()
+            else self._build_files_tab()
+        )
         self.live_deploy_tab = self._build_live_deploy_tab()
         self.modify_existing_tab = self._build_modify_existing_tab()
         self.manage_printer_tab = self._build_manage_printer_tab()
@@ -309,16 +423,114 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.live_deploy_tab, "SSH")
         self.tabs.addTab(self.modify_existing_tab, "Modify Existing")
         self.tabs.addTab(self.manage_printer_tab, "Manage Printer")
+        self.tabs.tabBar().setVisible(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.setCentralWidget(root)
+        self._init_toast_notification()
         self._ensure_about_window()
         self._build_footer_connection_health()
         self._set_manage_connected_printer_display(None, None, connected=False)
         self._set_modify_connected_printer_display(None, None, connected=False)
         self._refresh_modify_connection_summary()
         self._refresh_saved_machine_profiles()
+        self.app_state_store.subscribe(self._on_app_state_changed)
+        self._on_app_state_changed(self.app_state_store.snapshot())
         self.statusBar().showMessage("Ready")
+
+    def _init_toast_notification(self) -> None:
+        self.toast_notification = QLabel("", self.toast_anchor)
+        self.toast_notification.setObjectName("toast_notification")
+        self.toast_notification.setWordWrap(True)
+        self.toast_notification.setVisible(False)
+        self.toast_notification.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.toast_notification.setStyleSheet(
+            "QLabel {"
+            " background-color: #111827;"
+            " color: #e5e7eb;"
+            " border: 1px solid #374151;"
+            " border-radius: 6px;"
+            " padding: 8px 10px;"
+            " font-weight: 600;"
+            "}"
+        )
+        self.toast_hide_timer = QTimer(self)
+        self.toast_hide_timer.setSingleShot(True)
+        self.toast_hide_timer.timeout.connect(self._hide_toast_notification)
+
+    def _hide_toast_notification(self) -> None:
+        if hasattr(self, "toast_notification"):
+            self.toast_notification.setVisible(False)
+
+    def _position_toast_notification(self) -> None:
+        if not hasattr(self, "toast_notification"):
+            return
+        parent = self.toast_notification.parentWidget()
+        if parent is None:
+            return
+        margin = 14
+        max_width = max(240, min(420, int(parent.width() * 0.42)))
+        self.toast_notification.setFixedWidth(max_width)
+        hint = self.toast_notification.sizeHint()
+        self.toast_notification.resize(max_width, hint.height())
+        x = parent.width() - self.toast_notification.width() - margin
+        y = parent.height() - self.toast_notification.height() - margin
+        self.toast_notification.move(max(margin, x), max(margin, y))
+
+    def _show_toast_notification(
+        self,
+        message: str,
+        *,
+        severity: str = "info",
+        duration_ms: int = 4500,
+    ) -> None:
+        if not hasattr(self, "toast_notification"):
+            return
+        text = " ".join(str(message).split()).strip()
+        if not text:
+            return
+        style_by_severity = {
+            "warning": (
+                "QLabel {"
+                " background-color: #7f1d1d;"
+                " color: #ffffff;"
+                " border: 1px solid #ef4444;"
+                " border-radius: 6px;"
+                " padding: 8px 10px;"
+                " font-weight: 600;"
+                "}"
+            ),
+            "caution": (
+                "QLabel {"
+                " background-color: #78350f;"
+                " color: #ffffff;"
+                " border: 1px solid #f59e0b;"
+                " border-radius: 6px;"
+                " padding: 8px 10px;"
+                " font-weight: 600;"
+                "}"
+            ),
+            "info": (
+                "QLabel {"
+                " background-color: #111827;"
+                " color: #e5e7eb;"
+                " border: 1px solid #374151;"
+                " border-radius: 6px;"
+                " padding: 8px 10px;"
+                " font-weight: 600;"
+                "}"
+            ),
+        }
+        self.toast_notification.setText(text)
+        self.toast_notification.setStyleSheet(style_by_severity.get(severity, style_by_severity["info"]))
+        self._position_toast_notification()
+        self.toast_notification.setVisible(True)
+        self.toast_notification.raise_()
+        self.toast_hide_timer.start(max(1500, duration_ms))
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        self._position_toast_notification()
 
     def _build_persistent_preview_panel(self, parent: QWidget) -> QWidget:
         panel = QWidget(parent)
@@ -458,6 +670,164 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_persistent_preview_for_tab_change()
+        current = self.tabs.currentWidget()
+        route = "home"
+        if current is self.main_tab:
+            route = "home"
+        elif current is self.live_deploy_tab:
+            route = "connect"
+        elif current is self.files_tab:
+            route = "files"
+        elif current is self.modify_existing_tab:
+            route = "edit_config"
+        elif current is self.wizard_tab:
+            route = "generate"
+        elif current is self.manage_printer_tab:
+            route = "backups"
+        self.app_state_store.update_ui(active_route=route)
+        if hasattr(self, "left_nav_scaffold"):
+            self.left_nav_scaffold.select_route(route)
+
+    def _on_shell_route_selected(self, route_key: str) -> None:
+        route = (route_key or "").strip().lower()
+        if route == "legacy":
+            route = "home"
+        if route == "home":
+            self.tabs.setCurrentWidget(self.main_tab)
+            self.app_state_store.update_ui(
+                active_route=route,
+                right_panel_mode="context",
+            )
+            return
+        if route == "connect":
+            self.tabs.setCurrentWidget(self.live_deploy_tab)
+            self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
+            return
+        if route == "files":
+            self.tabs.setCurrentWidget(self.files_tab)
+            self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
+            return
+        if route == "edit_config":
+            self.tabs.setCurrentWidget(self.files_tab)
+            if hasattr(self, "validation_section_toggle"):
+                self.validation_section_toggle.setChecked(True)
+            self.app_state_store.update_ui(active_route=route, right_panel_mode="validation")
+            return
+        if route == "generate":
+            self.tabs.setCurrentWidget(self.wizard_tab)
+            self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
+            return
+        if route == "deploy":
+            self.tabs.setCurrentWidget(self.live_deploy_tab)
+            if hasattr(self, "ssh_log_section_toggle"):
+                self.ssh_log_section_toggle.setChecked(True)
+            self.app_state_store.update_ui(active_route=route, right_panel_mode="logs")
+            return
+        if route == "backups":
+            self.tabs.setCurrentWidget(self.manage_printer_tab)
+            self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
+            return
+
+    def _on_app_state_changed(self, state) -> None:  # noqa: ANN001
+        if not hasattr(self, "right_context_panel"):
+            return
+        ui = state.ui
+        if hasattr(self, "view_toggle_sidebar_action"):
+            self.view_toggle_sidebar_action.blockSignals(True)
+            self.view_toggle_sidebar_action.setChecked(bool(ui.left_nav_visible))
+            self.view_toggle_sidebar_action.blockSignals(False)
+        self.left_nav_scaffold.setVisible(bool(ui.left_nav_visible))
+        if hasattr(self, "view_right_panel_context_action"):
+            self.view_right_panel_context_action.setChecked(ui.right_panel_mode == "context")
+        if hasattr(self, "view_right_panel_validation_action"):
+            self.view_right_panel_validation_action.setChecked(ui.right_panel_mode == "validation")
+        if hasattr(self, "view_right_panel_logs_action"):
+            self.view_right_panel_logs_action.setChecked(ui.right_panel_mode == "logs")
+        if hasattr(self, "view_files_experiment_action"):
+            self.view_files_experiment_action.blockSignals(True)
+            self.view_files_experiment_action.setChecked(ui.files_ui_variant == "material_v1")
+            self.view_files_experiment_action.blockSignals(False)
+
+        mode = (ui.right_panel_mode or "context").strip().lower()
+        if mode == "validation":
+            panel_lines = [
+                "Validation",
+                "",
+                f"Blocking: {state.validation.blocking}",
+                f"Warnings: {state.validation.warnings}",
+                f"Source: {state.validation.source_label or 'n/a'}",
+                "",
+                "Tip: Use Configuration -> Validate Current for full diagnostics.",
+            ]
+        elif mode == "logs":
+            recent_logs: list[str] = []
+            if hasattr(self, "ssh_log"):
+                ssh_lines = self.ssh_log.toPlainText().splitlines()
+                if ssh_lines:
+                    recent_logs.extend(ssh_lines[-8:])
+            if hasattr(self, "modify_log"):
+                modify_lines = self.modify_log.toPlainText().splitlines()
+                if modify_lines:
+                    recent_logs.extend(modify_lines[-6:])
+            if not recent_logs:
+                recent_logs = ["(no console log entries yet)"]
+            panel_lines = ["Logs", ""] + recent_logs[-14:]
+        else:
+            panel_lines = ["Context", "", f"Route: {ui.active_route or 'home'}"]
+            if ui.active_route == "generate" and self.current_project is not None:
+                project = self.current_project
+                panel_lines.extend(
+                    [
+                        "",
+                        "Machine Summary",
+                        f"Preset: {project.preset_id}",
+                        f"Board: {project.board}",
+                        (
+                            f"Build volume: {project.dimensions.x} x {project.dimensions.y} x "
+                            f"{project.dimensions.z}"
+                        ),
+                        f"Probe: {project.probe.type or 'None'}",
+                        f"Toolhead: {project.toolhead.board or 'None'}",
+                        f"Add-ons: {', '.join(project.addons) if project.addons else 'None'}",
+                    ]
+                )
+            else:
+                panel_lines.extend(
+                    [
+                        "",
+                        f"Connected: {'yes' if state.connection.connected else 'no'}",
+                        f"Host: {state.connection.host or 'n/a'}",
+                        f"Printer: {state.connection.target_printer or 'n/a'}",
+                        "",
+                        f"Active file: {state.active_file.path or 'none'}",
+                        f"Source: {state.active_file.source or 'n/a'}",
+                        f"Dirty: {'yes' if state.active_file.dirty else 'no'}",
+                        "",
+                        f"Upload: {'busy' if state.deploy.upload_in_progress else 'idle'}",
+                        f"Upload status: {state.deploy.last_upload_status or 'n/a'}",
+                        f"Restart status: {state.deploy.last_restart_status or 'n/a'}",
+                    ]
+                )
+        self.right_context_panel.content.setPlainText("\n".join(panel_lines))
+        self.bottom_status_bar.set_connection(
+            state.connection.connected,
+            state.connection.target_printer or state.connection.host,
+        )
+        if state.deploy.upload_in_progress:
+            state_text = "uploading"
+        elif state.validation.blocking > 0:
+            state_text = f"blocked ({state.validation.blocking})"
+        elif state.validation.warnings > 0:
+            state_text = f"warnings ({state.validation.warnings})"
+        else:
+            state_text = "ready"
+        self.bottom_status_bar.set_state(state_text)
+        self._update_files_experiment_chips(
+            blocking=state.validation.blocking,
+            warnings=state.validation.warnings,
+            source_label=state.validation.source_label,
+        )
+        self._update_action_enablement()
 
     def _build_footer_connection_health(self) -> None:
         status_bar = self.statusBar()
@@ -470,6 +840,19 @@ class MainWindow(QMainWindow):
 
     def _set_device_connection_health(self, connected: bool, detail: str | None = None) -> None:
         self.device_connected = connected
+        host = self.ssh_host_edit.text().strip() if hasattr(self, "ssh_host_edit") else ""
+        printer_name = self.preview_connected_printer_name or ""
+        profile_name = self.ssh_connection_name_edit.text().strip() if hasattr(
+            self, "ssh_connection_name_edit"
+        ) else ""
+        self.app_state_store.update_connection(
+            connected=connected,
+            host=host,
+            target_printer=printer_name,
+            profile_name=profile_name,
+        )
+        if hasattr(self, "bottom_status_bar"):
+            self.bottom_status_bar.set_connection(connected, printer_name or host)
         if not hasattr(self, "device_health_icon"):
             return
         color = "#16a34a" if connected else "#dc2626"
@@ -869,99 +1252,289 @@ class MainWindow(QMainWindow):
         self.app_settings.sync()
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
+        menu_bar = self.menuBar()
+        menu_bar.clear()
 
-        new_action = QAction("New", self)
-        new_action.triggered.connect(self._new_project)
-        file_menu.addAction(new_action)
+        file_menu = menu_bar.addMenu("File")
+        self.file_new_machine_action = QAction("New Machine Profile", self)
+        self.file_new_machine_action.triggered.connect(self._new_project)
+        file_menu.addAction(self.file_new_machine_action)
 
-        load_action = QAction("Load Project...", self)
-        load_action.triggered.connect(self._load_project_from_file)
-        file_menu.addAction(load_action)
+        self.file_open_machine_action = QAction("Open Machine Profile...", self)
+        self.file_open_machine_action.setShortcut("Ctrl+O")
+        self.file_open_machine_action.triggered.connect(self._load_project_from_file)
+        file_menu.addAction(self.file_open_machine_action)
 
-        save_action = QAction("Save Project...", self)
-        save_action.triggered.connect(self._save_project_to_file)
-        file_menu.addAction(save_action)
+        self.file_save_action = QAction("Save", self)
+        self.file_save_action.setShortcut("Ctrl+S")
+        self.file_save_action.triggered.connect(self._save_project)
+        file_menu.addAction(self.file_save_action)
 
+        self.file_save_as_action = QAction("Save As...", self)
+        self.file_save_as_action.setShortcut("Ctrl+Shift+S")
+        self.file_save_as_action.triggered.connect(self._save_project_to_file)
+        file_menu.addAction(self.file_save_as_action)
         file_menu.addSeparator()
 
-        open_cfg_action = QAction("Open .cfg File...", self)
-        open_cfg_action.triggered.connect(self._open_local_cfg_file)
-        file_menu.addAction(open_cfg_action)
+        self.file_import_preset_action = QAction("Import Preset...", self)
+        self.file_import_preset_action.triggered.connect(self._import_preset_placeholder)
+        file_menu.addAction(self.file_import_preset_action)
 
-        self.import_existing_machine_action = QAction("Import Existing Machine...", self)
-        self.import_existing_machine_action.triggered.connect(
-            self._import_existing_machine_entrypoint
-        )
-        file_menu.addAction(self.import_existing_machine_action)
+        self.file_export_generated_pack_action = QAction("Export Generated Pack...", self)
+        self.file_export_generated_pack_action.triggered.connect(self._export_generated_pack_dialog)
+        file_menu.addAction(self.file_export_generated_pack_action)
 
-        file_menu.addSeparator()
-
+        # Retain direct export actions for existing workflows and test hooks.
         self.export_folder_action = QAction("Export Folder...", self)
         self.export_folder_action.triggered.connect(self._export_folder)
-        file_menu.addAction(self.export_folder_action)
-
         self.export_zip_action = QAction("Export ZIP...", self)
         self.export_zip_action.triggered.connect(self._export_zip)
-        file_menu.addAction(self.export_zip_action)
+        export_options_menu = file_menu.addMenu("Export Options")
+        export_options_menu.addAction(self.export_folder_action)
+        export_options_menu.addAction(self.export_zip_action)
 
+        file_menu.addSeparator()
+        self.file_settings_action = QAction("Settings", self)
+        self.file_settings_action.triggered.connect(self._open_settings_dialog)
+        file_menu.addAction(self.file_settings_action)
         file_menu.addSeparator()
 
         exit_action = QAction("Exit", self)
+        exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        tools_menu = self.menuBar().addMenu("&Tools")
-        compile_action = QAction("Compile", self)
-        compile_action.triggered.connect(self._render_and_validate)
-        tools_menu.addAction(compile_action)
+        view_menu = menu_bar.addMenu("View")
+        self.view_toggle_sidebar_action = QAction("Toggle Sidebar", self)
+        self.view_toggle_sidebar_action.setCheckable(True)
+        self.view_toggle_sidebar_action.setChecked(True)
+        self.view_toggle_sidebar_action.toggled.connect(self._set_sidebar_visible)
+        view_menu.addAction(self.view_toggle_sidebar_action)
 
-        self.tools_guided_component_setup_action = QAction("Guided Component Setup...", self)
-        self.tools_guided_component_setup_action.triggered.connect(
-            self._open_guided_component_setup
+        self.view_toggle_console_action = QAction("Toggle Console", self)
+        self.view_toggle_console_action.setCheckable(True)
+        self.view_toggle_console_action.setChecked(False)
+        self.view_toggle_console_action.toggled.connect(self._set_console_visible)
+        view_menu.addAction(self.view_toggle_console_action)
+
+        self.view_toggle_raw_form_action = QAction("Show Raw / Form Mode", self)
+        self.view_toggle_raw_form_action.triggered.connect(self._toggle_raw_form_mode)
+        view_menu.addAction(self.view_toggle_raw_form_action)
+
+        self.view_theme_menu = view_menu.addMenu("Theme (Dark/Light)")
+        self.view_theme_group = QActionGroup(self)
+        self.view_theme_group.setExclusive(True)
+        self.view_theme_dark_action = QAction("Dark", self)
+        self.view_theme_dark_action.setCheckable(True)
+        self.view_theme_dark_action.setActionGroup(self.view_theme_group)
+        self.view_theme_dark_action.triggered.connect(
+            lambda checked=False: self._apply_theme_mode("dark")
         )
-        tools_menu.addAction(self.tools_guided_component_setup_action)
-        tools_menu.addSeparator()
+        self.view_theme_menu.addAction(self.view_theme_dark_action)
 
-        printer_connection_menu = tools_menu.addMenu("Printer Connection")
+        self.view_theme_light_action = QAction("Light", self)
+        self.view_theme_light_action.setCheckable(True)
+        self.view_theme_light_action.setActionGroup(self.view_theme_group)
+        self.view_theme_light_action.triggered.connect(
+            lambda checked=False: self._apply_theme_mode("light")
+        )
+        self.view_theme_menu.addAction(self.view_theme_light_action)
 
-        self.tools_connect_menu = printer_connection_menu.addMenu("Connect")
+        self.view_experiments_menu = view_menu.addMenu("Experiments")
+        self.view_files_experiment_action = QAction("Files UI v1", self)
+        self.view_files_experiment_action.setCheckable(True)
+        self.view_files_experiment_action.setChecked(self._is_files_experiment_enabled())
+        self.view_files_experiment_action.toggled.connect(self._set_files_experiment_enabled)
+        self.view_experiments_menu.addAction(self.view_files_experiment_action)
+
+        self.view_reset_layout_action = QAction("Reset Layout", self)
+        self.view_reset_layout_action.triggered.connect(self._reset_layout)
+        view_menu.addAction(self.view_reset_layout_action)
+
+        self.view_right_panel_menu = view_menu.addMenu("Right Panel")
+        self.view_right_panel_group = QActionGroup(self)
+        self.view_right_panel_group.setExclusive(True)
+        self.view_right_panel_context_action = QAction("Context", self)
+        self.view_right_panel_context_action.setCheckable(True)
+        self.view_right_panel_context_action.setChecked(True)
+        self.view_right_panel_context_action.setActionGroup(self.view_right_panel_group)
+        self.view_right_panel_context_action.triggered.connect(
+            lambda checked=False: self.app_state_store.update_ui(right_panel_mode="context")
+        )
+        self.view_right_panel_menu.addAction(self.view_right_panel_context_action)
+
+        self.view_right_panel_validation_action = QAction("Validation", self)
+        self.view_right_panel_validation_action.setCheckable(True)
+        self.view_right_panel_validation_action.setActionGroup(self.view_right_panel_group)
+        self.view_right_panel_validation_action.triggered.connect(
+            lambda checked=False: self.app_state_store.update_ui(right_panel_mode="validation")
+        )
+        self.view_right_panel_menu.addAction(self.view_right_panel_validation_action)
+
+        self.view_right_panel_logs_action = QAction("Logs", self)
+        self.view_right_panel_logs_action.setCheckable(True)
+        self.view_right_panel_logs_action.setActionGroup(self.view_right_panel_group)
+        self.view_right_panel_logs_action.triggered.connect(
+            lambda checked=False: self.app_state_store.update_ui(right_panel_mode="logs")
+        )
+        self.view_right_panel_menu.addAction(self.view_right_panel_logs_action)
+
+        view_menu.addSeparator()
+        self._build_ui_scale_menu(view_menu, title="Zoom")
+
+        printer_menu = menu_bar.addMenu("Printer")
+        self.printer_connect_action = QAction("Connect...", self)
+        self.printer_connect_action.setShortcut("Ctrl+Shift+C")
+        self.printer_connect_action.triggered.connect(self._connect_ssh_from_command_bar)
+        printer_menu.addAction(self.printer_connect_action)
+        self.tools_connect_menu = printer_menu.addMenu("Connect")
         self.tools_connect_menu.aboutToShow.connect(self._refresh_tools_connect_menu)
         self._refresh_tools_connect_menu()
 
-        self.tools_open_remote_action = QAction("Open Remote File", self)
+        self.printer_disconnect_action = QAction("Disconnect", self)
+        self.printer_disconnect_action.triggered.connect(self._disconnect_printer)
+        printer_menu.addAction(self.printer_disconnect_action)
+
+        self.tools_scan_printers_action = QAction("Scan Network", self)
+        self.tools_scan_printers_action.triggered.connect(self._scan_for_printers)
+        printer_menu.addAction(self.tools_scan_printers_action)
+
+        self.tools_use_selected_host_action = QAction("Use Selected Host", self)
+        self.tools_use_selected_host_action.triggered.connect(self._use_selected_discovery_host)
+        printer_menu.addAction(self.tools_use_selected_host_action)
+
+        self.printer_manage_saved_action = QAction("Manage Saved Connections", self)
+        self.printer_manage_saved_action.triggered.connect(self._open_saved_connections_manager)
+        printer_menu.addAction(self.printer_manage_saved_action)
+
+        self.printer_open_control_action = QAction("Open Control UI (Mainsail/Fluidd)", self)
+        self.printer_open_control_action.triggered.connect(self._manage_open_control_window)
+        printer_menu.addAction(self.printer_open_control_action)
+
+        self.printer_upload_action = QAction("Upload Current", self)
+        self.printer_upload_action.setShortcut("Ctrl+Shift+U")
+        self.printer_upload_action.triggered.connect(self._upload_current_context)
+        printer_menu.addAction(self.printer_upload_action)
+
+        self.printer_restart_klipper_action = QAction("Restart Klipper", self)
+        self.printer_restart_klipper_action.setShortcut("Ctrl+Shift+R")
+        self.printer_restart_klipper_action.triggered.connect(self._restart_current_context)
+        printer_menu.addAction(self.printer_restart_klipper_action)
+
+        self.printer_restart_host_action = QAction("Restart Host", self)
+        self.printer_restart_host_action.triggered.connect(self._restart_host_service)
+        printer_menu.addAction(self.printer_restart_host_action)
+
+        self.printer_view_console_action = QAction("View Console Log", self)
+        self.printer_view_console_action.triggered.connect(self._view_printer_console_log)
+        printer_menu.addAction(self.printer_view_console_action)
+
+        configuration_menu = menu_bar.addMenu("Configuration")
+        self.tools_open_remote_action = QAction("Open Remote Config", self)
         self.tools_open_remote_action.triggered.connect(self._fetch_remote_cfg_file)
-        printer_connection_menu.addAction(self.tools_open_remote_action)
+        configuration_menu.addAction(self.tools_open_remote_action)
+
+        self.configuration_open_local_action = QAction("Open Local Config", self)
+        self.configuration_open_local_action.triggered.connect(self._open_local_cfg_file)
+        configuration_menu.addAction(self.configuration_open_local_action)
+
+        self.configuration_validate_action = QAction("Validate Current", self)
+        self.configuration_validate_action.setShortcut("Ctrl+Shift+V")
+        self.configuration_validate_action.triggered.connect(self._validate_current_context)
+        configuration_menu.addAction(self.configuration_validate_action)
+
+        self.configuration_refactor_action = QAction("Refactor Current", self)
+        self.configuration_refactor_action.triggered.connect(self._refactor_current_cfg_file)
+        configuration_menu.addAction(self.configuration_refactor_action)
+
+        self.configuration_apply_form_action = QAction("Apply Form Changes", self)
+        self.configuration_apply_form_action.triggered.connect(self._apply_cfg_form_changes)
+        configuration_menu.addAction(self.configuration_apply_form_action)
+
+        self.configuration_compile_action = QAction("Compile / Generate", self)
+        self.configuration_compile_action.setShortcut("Ctrl+Shift+G")
+        self.configuration_compile_action.triggered.connect(self._render_and_validate)
+        configuration_menu.addAction(self.configuration_compile_action)
+
+        self.configuration_manage_addons_action = QAction("Manage Add-ons", self)
+        self.configuration_manage_addons_action.triggered.connect(self._open_manage_addons)
+        configuration_menu.addAction(self.configuration_manage_addons_action)
+
+        self.configuration_section_overrides_action = QAction("Section Overrides", self)
+        self.configuration_section_overrides_action.triggered.connect(
+            self._open_section_overrides
+        )
+        configuration_menu.addAction(self.configuration_section_overrides_action)
+
+        tools_menu = menu_bar.addMenu("Tools")
+        self.tools_printer_discovery_action = QAction("Printer Discovery", self)
+        self.tools_printer_discovery_action.triggered.connect(self._open_printer_discovery)
+        tools_menu.addAction(self.tools_printer_discovery_action)
 
         self.tools_explore_config_action = QAction("Explore Config Directory", self)
         self.tools_explore_config_action.triggered.connect(
             self._explore_connected_config_directory
         )
-        printer_connection_menu.addAction(self.tools_explore_config_action)
+        tools_menu.addAction(self.tools_explore_config_action)
+
+        self.tools_backup_manager_action = QAction("Backup Manager", self)
+        self.tools_backup_manager_action.triggered.connect(self._open_backup_manager)
+        tools_menu.addAction(self.tools_backup_manager_action)
+
+        self.tools_firmware_info_action = QAction("Firmware Info", self)
+        self.tools_firmware_info_action.triggered.connect(self._show_firmware_info)
+        tools_menu.addAction(self.tools_firmware_info_action)
+
+        self.import_existing_machine_action = QAction("Import Machine Analysis", self)
+        self.import_existing_machine_action.triggered.connect(
+            self._import_existing_machine_entrypoint
+        )
+        tools_menu.addAction(self.import_existing_machine_action)
+
+        self.tools_advanced_settings_menu = tools_menu.addMenu("Advanced Settings")
+        self.tools_guided_component_setup_action = QAction("Guided Component Setup...", self)
+        self.tools_guided_component_setup_action.triggered.connect(
+            self._open_guided_component_setup
+        )
+        self.tools_advanced_settings_menu.addAction(self.tools_guided_component_setup_action)
+
+        self.tools_learn_addons_action = QAction("Learn Add-ons from Imported Config", self)
+        self.tools_learn_addons_action.triggered.connect(self._learn_addons_from_import)
+        self.tools_advanced_settings_menu.addAction(self.tools_learn_addons_action)
 
         self.tools_deploy_action = QAction("Deploy Generated Pack", self)
         self.tools_deploy_action.triggered.connect(self._deploy_generated_pack)
-        printer_connection_menu.addAction(self.tools_deploy_action)
+        self.tools_advanced_settings_menu.addAction(self.tools_deploy_action)
 
-        printer_connection_menu.addSeparator()
-        self.tools_scan_printers_action = QAction("Scan for Printers", self)
-        self.tools_scan_printers_action.triggered.connect(self._scan_for_printers)
-        printer_connection_menu.addAction(self.tools_scan_printers_action)
+        self.tools_advanced_settings_action = QAction("Open Settings Dialog", self)
+        self.tools_advanced_settings_action.triggered.connect(self._open_settings_dialog)
+        self.tools_advanced_settings_menu.addAction(self.tools_advanced_settings_action)
 
-        self.tools_use_selected_host_action = QAction("Use Selected Host", self)
-        self.tools_use_selected_host_action.triggered.connect(self._use_selected_discovery_host)
-        printer_connection_menu.addAction(self.tools_use_selected_host_action)
+        help_menu = menu_bar.addMenu("Help")
+        self.help_docs_action = QAction("Documentation", self)
+        self.help_docs_action.triggered.connect(self._open_documentation)
+        help_menu.addAction(self.help_docs_action)
 
-        view_menu = self.menuBar().addMenu("&View")
-        self._build_ui_scale_menu(view_menu)
+        self.help_quick_start_action = QAction("Quick Start", self)
+        self.help_quick_start_action.triggered.connect(self._show_quick_start)
+        help_menu.addAction(self.help_quick_start_action)
 
-        help_menu = self.menuBar().addMenu("&Help")
-        self.help_about_action = QAction("About KlippConfig", self)
+        self.help_shortcuts_action = QAction("Keyboard Shortcuts", self)
+        self.help_shortcuts_action.triggered.connect(self._show_keyboard_shortcuts)
+        help_menu.addAction(self.help_shortcuts_action)
+
+        self.help_updates_action = QAction("Check for Updates", self)
+        self.help_updates_action.triggered.connect(self._check_for_updates)
+        help_menu.addAction(self.help_updates_action)
+
+        self.help_about_action = QAction("About", self)
         self.help_about_action.triggered.connect(self._show_about_window)
         help_menu.addAction(self.help_about_action)
 
-    def _build_ui_scale_menu(self, view_menu) -> None:
-        scale_menu = view_menu.addMenu("UI Scale")
+        self._apply_theme_mode(self.theme_mode, persist=False)
+
+    def _build_ui_scale_menu(self, view_menu, *, title: str = "UI Scale") -> None:
+        scale_menu = view_menu.addMenu(title)
         action_group = QActionGroup(self)
         action_group.setExclusive(True)
         self.ui_scale_actions.clear()
@@ -1000,6 +1573,447 @@ class MainWindow(QMainWindow):
 
         label = "Auto" if selected_mode == "auto" else f"{selected_mode}%"
         self.statusBar().showMessage(f"UI scale set to {label}", 2500)
+
+    def _save_project(self) -> None:
+        if self.current_project_path:
+            self._save_project_to_path(self.current_project_path)
+            return
+        self._save_project_to_file()
+
+    def _save_project_to_path(self, path: str) -> None:
+        try:
+            project = self._build_project_from_ui()
+        except (ValidationError, ValueError) as exc:
+            self._show_error("Save Failed", str(exc))
+            return
+
+        try:
+            self.project_store.save(path, project)
+        except OSError as exc:
+            self._show_error("Save Failed", str(exc))
+            return
+
+        self.current_project_path = str(path)
+        self.statusBar().showMessage(f"Saved project: {path}", 2500)
+
+    def _import_preset_placeholder(self) -> None:
+        QMessageBox.information(
+            self,
+            "Import Preset",
+            (
+                "Preset import files are not supported in this build.\n\n"
+                "Use bundled presets from Configuration, or use Tools -> Import Machine Analysis "
+                "to learn settings from an existing machine."
+            ),
+        )
+
+    def _export_generated_pack_dialog(self) -> None:
+        if not self._ensure_export_ready():
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Export Generated Pack")
+        dialog.setText("Choose export format.")
+        folder_button = dialog.addButton("Folder", QMessageBox.ButtonRole.AcceptRole)
+        zip_button = dialog.addButton("ZIP", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked is folder_button:
+            self._export_folder()
+            return
+        if clicked is zip_button:
+            self._export_zip()
+
+    def _open_settings_dialog(self) -> None:
+        QMessageBox.information(
+            self,
+            "Settings",
+            (
+                "Use these command-bar settings areas:\n"
+                "- View -> Theme (Dark/Light)\n"
+                "- View -> Zoom\n"
+                "- Tools -> Advanced Settings"
+            ),
+        )
+
+    def _set_sidebar_visible(self, visible: bool) -> None:
+        self.app_state_store.update_ui(left_nav_visible=visible)
+        if hasattr(self, "left_nav_scaffold"):
+            self.left_nav_scaffold.setVisible(visible)
+        if hasattr(self, "generated_file_list"):
+            self.generated_file_list.setVisible(visible)
+        if hasattr(self, "wizard_package_list_group"):
+            self.wizard_package_list_group.setVisible(visible)
+
+        if hasattr(self, "files_splitter"):
+            self.files_splitter.setSizes([1, 3] if visible else [0, 4])
+        if hasattr(self, "wizard_package_splitter"):
+            self.wizard_package_splitter.setSizes([1, 3] if visible else [0, 4])
+
+        self.statusBar().showMessage(
+            "Sidebar shown" if visible else "Sidebar hidden",
+            2000,
+        )
+
+    def _set_console_visible(self, visible: bool) -> None:
+        self.app_state_store.update_ui(right_panel_mode="logs" if visible else "context")
+        for toggle_name in (
+            "ssh_log_section_toggle",
+            "manage_log_section_toggle",
+            "modify_log_section_toggle",
+        ):
+            toggle = getattr(self, toggle_name, None)
+            if isinstance(toggle, QToolButton):
+                toggle.setChecked(visible)
+        self.statusBar().showMessage(
+            "Console shown" if visible else "Console hidden",
+            2000,
+        )
+
+    def _set_advanced_mode(self, enabled: bool) -> None:
+        if hasattr(self, "tabs"):
+            self.tabs.tabBar().setVisible(enabled)
+        if enabled:
+            self.app_state_store.update_ui(legacy_visible=True)
+            self.statusBar().showMessage("Advanced mode enabled", 2000)
+            return
+        self.app_state_store.update_ui(legacy_visible=False)
+        self.statusBar().showMessage("Advanced mode hidden", 2000)
+
+    def _connect_ssh_from_command_bar(self) -> None:
+        self._on_shell_route_selected("connect")
+        self._connect_ssh_to_host()
+
+    def _active_route(self) -> str:
+        snapshot = self.app_state_store.snapshot()
+        return (snapshot.ui.active_route or "home").strip().lower()
+
+    def _has_ssh_target_configured(self) -> bool:
+        if not hasattr(self, "ssh_host_edit") or not hasattr(self, "ssh_username_edit"):
+            return False
+        return bool(self.ssh_host_edit.text().strip()) and bool(self.ssh_username_edit.text().strip())
+
+    def _has_modify_cfg_context(self) -> bool:
+        if not hasattr(self, "modify_editor") or not hasattr(self, "modify_remote_cfg_path_edit"):
+            return False
+        remote_path = (self.modify_current_remote_file or "").strip()
+        if not remote_path:
+            remote_path = self.modify_remote_cfg_path_edit.text().strip()
+        return bool(remote_path.lower().endswith(".cfg")) and bool(
+            self.modify_editor.toPlainText().strip()
+        )
+
+    def _has_manage_cfg_context(self) -> bool:
+        if not hasattr(self, "manage_file_editor"):
+            return False
+        remote_path = (self.manage_current_remote_file or "").strip()
+        return bool(remote_path.lower().endswith(".cfg")) and bool(
+            self.manage_file_editor.toPlainText().strip()
+        )
+
+    def _has_files_cfg_context(self) -> bool:
+        return self._current_cfg_context(show_error=False) is not None
+
+    def _can_upload_generated_pack(self) -> bool:
+        return (
+            self.current_project is not None
+            and self.current_pack is not None
+            and not self.current_report.has_blocking
+            and self._has_ssh_target_configured()
+        )
+
+    def _can_validate_current_context(self) -> bool:
+        route = self._active_route()
+        if route == "edit_config":
+            return self._has_modify_cfg_context()
+        if route == "backups":
+            return self._has_manage_cfg_context()
+        return self._has_files_cfg_context()
+
+    def _can_upload_current_context(self) -> bool:
+        route = self._active_route()
+        if route == "edit_config":
+            return self.device_connected and self._has_modify_cfg_context()
+        if route == "backups":
+            return self.device_connected and bool((self.manage_current_remote_file or "").strip())
+        return self._can_upload_generated_pack()
+
+    def _validate_current_context(self, _checked: bool = False) -> None:
+        route = self._active_route()
+        if route == "edit_config":
+            self._modify_validate_current_file()
+            return
+        if route == "backups":
+            self._manage_validate_current_file()
+            return
+        self._validate_current_cfg_file()
+
+    def _upload_current_context(self, _checked: bool = False) -> None:
+        route = self._active_route()
+        if route == "edit_config":
+            self._modify_upload_current_file()
+            return
+        if route == "backups":
+            self._manage_save_current_file()
+            return
+        self._deploy_generated_pack()
+
+    def _restart_current_context(self, _checked: bool = False) -> None:
+        if self._active_route() == "edit_config":
+            self._modify_test_restart()
+            return
+        self._restart_klipper_service()
+
+    def _toggle_raw_form_mode(self) -> None:
+        if not hasattr(self, "file_view_tabs"):
+            return
+        next_index = 1 if self.file_view_tabs.currentIndex() == 0 else 0
+        self.file_view_tabs.setCurrentIndex(next_index)
+        label = "Form" if next_index == 1 else "Raw"
+        self.action_log_service.log_event("files_view_mode", mode=label.lower())
+        self.statusBar().showMessage(f"Files view set to {label} mode", 2000)
+
+    def _apply_theme_mode(self, mode: str, *, persist: bool = True) -> None:
+        selected = mode.strip().lower()
+        if selected not in {"dark", "light"}:
+            selected = "dark"
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        stylesheet = build_base_stylesheet(selected)
+        if self._is_files_experiment_enabled():
+            stylesheet += "\n" + build_files_material_stylesheet(selected)
+        app.setStyleSheet(stylesheet)
+        self.theme_mode = selected
+        if hasattr(self, "view_theme_dark_action"):
+            self.view_theme_dark_action.setChecked(selected == "dark")
+        if hasattr(self, "view_theme_light_action"):
+            self.view_theme_light_action.setChecked(selected == "light")
+        if persist:
+            self.app_settings.setValue("ui/theme_mode", selected)
+            self.app_settings.sync()
+        self.statusBar().showMessage(f"Theme set to {selected.title()}", 2000)
+
+    def _reset_layout(self) -> None:
+        if hasattr(self, "view_toggle_sidebar_action"):
+            self.view_toggle_sidebar_action.setChecked(True)
+        else:
+            self._set_sidebar_visible(True)
+
+        if hasattr(self, "view_toggle_console_action"):
+            self.view_toggle_console_action.setChecked(False)
+        else:
+            self._set_console_visible(False)
+
+        if hasattr(self, "file_view_tabs"):
+            self.file_view_tabs.setCurrentIndex(0)
+        if hasattr(self, "wizard_package_splitter"):
+            self.wizard_package_splitter.setSizes([1, 3])
+        if hasattr(self, "files_splitter"):
+            self.files_splitter.setSizes([1, 3])
+        self.statusBar().showMessage("Layout reset", 2500)
+
+    def _open_manage_addons(self) -> None:
+        self.tabs.setCurrentWidget(self.wizard_tab)
+        self.app_state_store.update_ui(active_route="generate", right_panel_mode="context")
+        if hasattr(self, "addons_section_toggle"):
+            self.addons_section_toggle.setChecked(True)
+        self.statusBar().showMessage("Focused add-on management", 2500)
+
+    def _open_section_overrides(self) -> None:
+        self.tabs.setCurrentWidget(self.files_tab)
+        self.app_state_store.update_ui(active_route="edit_config", right_panel_mode="validation")
+        if hasattr(self, "overrides_section_toggle"):
+            self.overrides_section_toggle.setChecked(True)
+        self.statusBar().showMessage("Opened section overrides", 2500)
+
+    def _open_printer_discovery(self) -> None:
+        self.tabs.setCurrentWidget(self.live_deploy_tab)
+        self.app_state_store.update_ui(active_route="connect", right_panel_mode="context")
+        self._scan_for_printers()
+
+    def _open_backup_manager(self) -> None:
+        self.tabs.setCurrentWidget(self.manage_printer_tab)
+        self.app_state_store.update_ui(active_route="backups", right_panel_mode="context")
+        self._manage_refresh_backups()
+        self.statusBar().showMessage("Opened backup manager", 2500)
+
+    def _show_firmware_info(self) -> None:
+        project = self.current_project
+        pack = self.current_pack
+        if project is None:
+            QMessageBox.information(self, "Firmware Info", "No active project loaded.")
+            return
+        preset_name = self.current_preset.name if self.current_preset is not None else project.preset_id
+        file_count = len(pack.files) if pack is not None else 0
+        QMessageBox.information(
+            self,
+            "Firmware Info",
+            (
+                f"Preset: {preset_name}\n"
+                f"Mainboard: {project.board}\n"
+                f"Build volume: {project.dimensions.x} x {project.dimensions.y} x {project.dimensions.z}\n"
+                f"Generated files: {file_count}\n"
+                f"Validation blocking issues: {sum(1 for f in self.current_report.findings if f.severity == 'blocking')}"
+            ),
+        )
+
+    def _open_saved_connections_manager(self) -> None:
+        self.tabs.setCurrentWidget(self.live_deploy_tab)
+        self._refresh_saved_connection_profiles()
+        self.statusBar().showMessage("Manage saved connections in SSH tab", 2500)
+
+    def _disconnect_printer(self) -> None:
+        self._set_device_connection_health(False, "Disconnected from printer.")
+        self.preview_connected_printer_name = None
+        self.preview_connected_host = None
+        self._set_manage_connected_printer_display(None, None, connected=False)
+        self._set_modify_connected_printer_display(None, None, connected=False)
+        self._append_ssh_log("Disconnected printer session.")
+        self._append_modify_log("Disconnected printer session.")
+        self._append_manage_log("Disconnected printer session.")
+        self.statusBar().showMessage("Disconnected", 2500)
+
+    def _run_printer_command(
+        self,
+        *,
+        command: str,
+        action_name: str,
+        disconnect_after: bool = False,
+    ) -> None:
+        if not self.device_connected:
+            self._show_error("Printer Command", "Connect to a printer first.")
+            return
+
+        service = self._get_ssh_service()
+        if service is None:
+            return
+        params = self._collect_ssh_params()
+        if params is None:
+            return
+
+        self.action_log_service.log_event(
+            "restart",
+            phase="start",
+            action_name=action_name,
+            command=command,
+            host=str(params["host"]),
+        )
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            output = service.run_remote_command(command=command, **params).strip()
+        except SSHDeployError as exc:
+            self.app_state_store.update_deploy(last_restart_status=f"failed: {exc}")
+            self._set_device_connection_health(False, str(exc))
+            self._show_error(action_name, str(exc))
+            self.action_log_service.log_event(
+                "restart",
+                phase="failed",
+                action_name=action_name,
+                command=command,
+                host=str(params["host"]),
+                error=str(exc),
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        summary = output or "(no output)"
+        self._append_ssh_log(f"{action_name}: {summary}")
+        self._append_modify_log(f"{action_name}: {summary}")
+        self._append_manage_log(f"{action_name}: {summary}")
+        self.app_state_store.update_deploy(last_restart_status=summary)
+        self.action_log_service.log_event(
+            "restart",
+            phase="complete",
+            action_name=action_name,
+            command=command,
+            host=str(params["host"]),
+            output=summary,
+        )
+        if disconnect_after:
+            self._disconnect_printer()
+            self.statusBar().showMessage(f"{action_name} issued: {summary}", 3000)
+            return
+        self._set_device_connection_health(True, f"{action_name} succeeded.")
+        self.statusBar().showMessage(f"{action_name} succeeded", 3000)
+
+    def _restart_klipper_service(self) -> None:
+        command = self.ssh_restart_cmd_edit.text().strip() or "sudo systemctl restart klipper"
+        self._run_printer_command(command=command, action_name="Restart Klipper")
+
+    def _restart_host_service(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Restart Host",
+            "Issue 'sudo reboot' on the connected printer host?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_printer_command(
+            command="sudo reboot",
+            action_name="Restart Host",
+            disconnect_after=True,
+        )
+
+    def _view_printer_console_log(self) -> None:
+        self.tabs.setCurrentWidget(self.live_deploy_tab)
+        self.app_state_store.update_ui(active_route="deploy", right_panel_mode="logs")
+        self.ssh_log_section_toggle.setChecked(True)
+        if hasattr(self, "view_toggle_console_action"):
+            self.view_toggle_console_action.setChecked(True)
+        self.statusBar().showMessage("Opened printer console log", 2500)
+
+    def _open_documentation(self) -> None:
+        readme = Path(__file__).resolve().parents[2] / "README.md"
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(readme)))
+
+    def _show_quick_start(self) -> None:
+        QMessageBox.information(
+            self,
+            "Quick Start",
+            (
+                "1. Select Vendor, Preset, and Mainboard in Configuration.\n"
+                "2. Fill hardware fields (probe/toolhead/thermistors).\n"
+                "3. Use Configuration -> Compile / Generate.\n"
+                "4. Review files in Files tab.\n"
+                "5. Export via File -> Export Generated Pack..."
+            ),
+        )
+
+    def _show_keyboard_shortcuts(self) -> None:
+        QMessageBox.information(
+            self,
+            "Keyboard Shortcuts",
+            (
+                "Common shortcuts:\n"
+                "Ctrl+S: Save machine profile project\n"
+                "Ctrl+Shift+S: Save project as\n"
+                "Ctrl+O: Open machine profile\n"
+                "Ctrl+Shift+C: Connect\n"
+                "Ctrl+Shift+V: Validate Current\n"
+                "Ctrl+Shift+G: Compile / Generate\n"
+                "Ctrl+Shift+U: Upload Current\n"
+                "Ctrl+Shift+R: Restart Klipper\n"
+                "Ctrl+Q: Exit"
+            ),
+        )
+
+    def _check_for_updates(self) -> None:
+        QMessageBox.information(
+            self,
+            "Check for Updates",
+            (
+                f"KlippConfig version: {__version__}\n\n"
+                "Automatic update checks are not configured in this build."
+            ),
+        )
 
     def _go_to_configuration_tab(self) -> None:
         self.tabs.setCurrentWidget(self.wizard_tab)
@@ -1387,6 +2401,43 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage("Guided component setup created bundle files", 3000)
 
+    def _learn_addons_from_import(self) -> None:
+        if self.current_import_profile is None or not self.imported_file_map:
+            self._show_error(
+                "Learn Add-ons",
+                "Import an existing machine first, then run add-on learning.",
+            )
+            return
+        try:
+            created_paths = self.addon_bundle_learning_service.learn_from_import(
+                self.current_import_profile,
+                self.imported_file_map,
+            )
+        except OSError as exc:
+            self._show_error("Learn Add-ons", str(exc))
+            return
+
+        if not created_paths:
+            QMessageBox.information(
+                self,
+                "Learn Add-ons",
+                "No supported add-on files were detected in the imported config.",
+            )
+            return
+
+        self._refresh_bundle_backed_component_options()
+        created_lines = "\n".join(str(path) for path in created_paths)
+        QMessageBox.information(
+            self,
+            "Learn Add-ons",
+            (
+                "Learned add-on bundle files:\n"
+                f"{created_lines}\n\n"
+                "Reloaded bundle catalog. Learned add-ons are now available."
+            ),
+        )
+        self.statusBar().showMessage("Learned add-on bundles from imported config", 3000)
+
     def _show_about_window(self) -> None:
         self._ensure_about_window()
         if self.about_window is None:
@@ -1508,8 +2559,12 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _format_import_value(value: Any) -> str:
         if isinstance(value, list):
+            if len(value) > 6:
+                return f"{len(value)} item(s)"
             return ", ".join(str(item) for item in value)
         if isinstance(value, dict):
+            if len(value) > 6:
+                return f"{len(value)} key(s)"
             return ", ".join(f"{k}={v}" for k, v in value.items())
         return str(value)
 
@@ -1540,6 +2595,7 @@ class MainWindow(QMainWindow):
 
         warning_count = len(profile.analysis_warnings)
         suggestion_count = len(profile.suggestions)
+        unmapped_count = sum(len(items) for items in profile.unmapped_sections.values())
         if warning_count > 0:
             preview_warning = profile.analysis_warnings[0]
             self.import_review_status_label.setText(
@@ -1552,7 +2608,8 @@ class MainWindow(QMainWindow):
             )
         else:
             self.import_review_status_label.setText(
-                f"Loaded {suggestion_count} suggestion(s). Select rows to apply."
+                f"Loaded {suggestion_count} suggestion(s). "
+                f"Unmapped sections: {unmapped_count}. Select rows to apply."
             )
             self.import_review_status_label.setStyleSheet(
                 "QLabel { background-color: #111827; color: #e5e7eb; border: 1px solid #374151; "
@@ -1903,26 +2960,22 @@ class MainWindow(QMainWindow):
         self.modify_refactor_btn.clicked.connect(self._modify_refactor_current_file)
         action_row.addWidget(self.modify_refactor_btn)
 
-        self.modify_validate_btn = QPushButton("Validate", tab)
-        self.modify_validate_btn.clicked.connect(self._modify_validate_current_file)
-        action_row.addWidget(self.modify_validate_btn)
-
-        self.modify_upload_btn = QPushButton("Upload", tab)
-        self.modify_upload_btn.clicked.connect(self._modify_upload_current_file)
-        action_row.addWidget(self.modify_upload_btn)
-
-        self.modify_test_restart_btn = QPushButton("Test Restart", tab)
-        self.modify_test_restart_btn.clicked.connect(self._modify_test_restart)
-        action_row.addWidget(self.modify_test_restart_btn)
-
         action_row.addStretch(1)
         layout.addLayout(action_row)
+        primary_actions_hint = QLabel(
+            "Primary actions run from command bar: Configuration -> Validate Current, "
+            "Printer -> Upload Current, Printer -> Restart Klipper.",
+            tab,
+        )
+        primary_actions_hint.setWordWrap(True)
+        layout.addWidget(primary_actions_hint)
 
         self.modify_status_label = QLabel("No remote file loaded.", tab)
         self.modify_status_label.setWordWrap(True)
         layout.addWidget(self.modify_status_label)
 
         self.modify_editor = QPlainTextEdit(tab)
+        self.modify_editor.textChanged.connect(self._update_action_enablement)
         layout.addWidget(self.modify_editor, 1)
 
         (
@@ -2065,7 +3118,7 @@ class MainWindow(QMainWindow):
         self.preset_notes_label = QLabel("", tab)
         self.preset_notes_label.setWordWrap(True)
         top_row.addWidget(self.preset_notes_label, 1)
-        layout.addLayout(top_row)
+        layout.addLayout(top_row, 0)
 
         grid = QGridLayout()
         grid.setColumnStretch(0, 2)
@@ -2249,11 +3302,97 @@ class MainWindow(QMainWindow):
         led_section_layout.addWidget(self.led_group)
         options_layout.addWidget(led_section)
 
+        (
+            addon_details_section,
+            self.addon_details_section_toggle,
+            self.addon_details_section_content,
+            addon_details_layout,
+        ) = self._build_collapsible_section(
+            "Add-on Package Details",
+            options_group,
+            expanded=False,
+        )
+        self.addon_package_details_view = QPlainTextEdit(self.addon_details_section_content)
+        self.addon_package_details_view.setReadOnly(True)
+        self.addon_package_details_view.setPlaceholderText(
+            "Enable add-ons to preview learned package include files and template mapping."
+        )
+        addon_details_layout.addWidget(self.addon_package_details_view, 1)
+        options_layout.addWidget(addon_details_section)
+
         grid.addWidget(options_group, 1, 0)
 
+        machine_attr_group = QGroupBox("Machine Attributes", tab)
+        machine_attr_layout = QVBoxLayout(machine_attr_group)
+        machine_attr_layout.setSpacing(6)
+
+        (
+            mcu_section,
+            self.machine_attr_mcu_toggle,
+            self.machine_attr_mcu_content,
+            mcu_section_layout,
+        ) = self._build_collapsible_section(
+            "MCU Map",
+            machine_attr_group,
+            expanded=False,
+        )
+        self.machine_attr_mcu_view = QPlainTextEdit(self.machine_attr_mcu_content)
+        self.machine_attr_mcu_view.setReadOnly(True)
+        mcu_section_layout.addWidget(self.machine_attr_mcu_view, 1)
+        machine_attr_layout.addWidget(mcu_section)
+
+        (
+            motion_section,
+            self.machine_attr_motion_toggle,
+            self.machine_attr_motion_content,
+            motion_section_layout,
+        ) = self._build_collapsible_section(
+            "Motion and Drivers",
+            machine_attr_group,
+            expanded=False,
+        )
+        self.machine_attr_motion_view = QPlainTextEdit(self.machine_attr_motion_content)
+        self.machine_attr_motion_view.setReadOnly(True)
+        motion_section_layout.addWidget(self.machine_attr_motion_view, 1)
+        machine_attr_layout.addWidget(motion_section)
+
+        (
+            probe_section,
+            self.machine_attr_probe_toggle,
+            self.machine_attr_probe_content,
+            probe_section_layout,
+        ) = self._build_collapsible_section(
+            "Probe + Leveling + Mesh",
+            machine_attr_group,
+            expanded=False,
+        )
+        self.machine_attr_probe_view = QPlainTextEdit(self.machine_attr_probe_content)
+        self.machine_attr_probe_view.setReadOnly(True)
+        probe_section_layout.addWidget(self.machine_attr_probe_view, 1)
+        machine_attr_layout.addWidget(probe_section)
+
+        (
+            thermal_section,
+            self.machine_attr_thermal_toggle,
+            self.machine_attr_thermal_content,
+            thermal_section_layout,
+        ) = self._build_collapsible_section(
+            "Thermal + Fan + Sensors",
+            machine_attr_group,
+            expanded=False,
+        )
+        self.machine_attr_thermal_view = QPlainTextEdit(self.machine_attr_thermal_content)
+        self.machine_attr_thermal_view.setReadOnly(True)
+        thermal_section_layout.addWidget(self.machine_attr_thermal_view, 1)
+        machine_attr_layout.addWidget(thermal_section)
+
+        grid.addWidget(machine_attr_group, 2, 0)
+
         package_splitter = QSplitter(Qt.Orientation.Horizontal, tab)
+        self.wizard_package_splitter = package_splitter
 
         package_list_group = QGroupBox("Project Package", package_splitter)
+        self.wizard_package_list_group = package_list_group
         package_list_layout = QVBoxLayout(package_list_group)
         self.wizard_package_file_list = QListWidget(package_list_group)
         self.wizard_package_file_list.itemSelectionChanged.connect(
@@ -2275,37 +3414,159 @@ class MainWindow(QMainWindow):
 
         package_splitter.setStretchFactor(0, 1)
         package_splitter.setStretchFactor(1, 3)
-        grid.addWidget(package_splitter, 0, 1, 2, 1)
+        grid.addWidget(package_splitter, 0, 1, 3, 1)
 
-        layout.addLayout(grid)
+        layout.addLayout(grid, 1)
         return tab
+
+    def _build_files_tab_experimental(self) -> QWidget:
+        tab = self._build_files_tab()
+        tab.setObjectName("files_tab_material_v1")
+        layout = tab.layout()
+        if isinstance(layout, QVBoxLayout):
+            layout.setContentsMargins(10, 10, 10, 10)
+            layout.setSpacing(8)
+
+        if hasattr(self, "files_top_command_bar"):
+            self.files_top_command_bar.setObjectName("files_top_command_bar")
+        if hasattr(self, "files_show_generated_btn"):
+            self.files_show_generated_btn.setObjectName("files_tonal_action")
+        if hasattr(self, "apply_form_btn"):
+            self.apply_form_btn.setObjectName("files_primary_action")
+        if hasattr(self, "refactor_cfg_btn"):
+            self.refactor_cfg_btn.setObjectName("files_tonal_action")
+        if hasattr(self, "preview_path_label"):
+            self.preview_path_label.setObjectName("files_path_label")
+        if hasattr(self, "files_breadcrumbs_label"):
+            self.files_breadcrumbs_label.setObjectName("files_path_label")
+        if hasattr(self, "generated_file_list"):
+            self.generated_file_list.setObjectName("files_generated_list")
+        if hasattr(self, "file_view_tabs"):
+            self.file_view_tabs.setObjectName("files_view_tabs")
+        if hasattr(self, "validation_table"):
+            self.validation_table.setObjectName("files_validation_table")
+        if hasattr(self, "import_review_table"):
+            self.import_review_table.setObjectName("files_import_review_table")
+
+        self._install_files_experiment_chip_row(tab)
+        self._update_files_experiment_chips(blocking=0, warnings=0, source_label="")
+        return tab
+
+    def _install_files_experiment_chip_row(self, tab: QWidget) -> None:
+        layout = tab.layout()
+        if not isinstance(layout, QVBoxLayout):
+            return
+        if hasattr(self, "files_primary_status_chip"):
+            return
+
+        chip_row = QHBoxLayout()
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        chip_row.setSpacing(8)
+
+        self.files_primary_status_chip = QLabel("No file loaded", tab)
+        self.files_blocking_chip = QLabel("Blocking: 0", tab)
+        self.files_warning_chip = QLabel("Warnings: 0", tab)
+        self.files_dirty_chip = QLabel("Saved", tab)
+        for chip in (
+            self.files_primary_status_chip,
+            self.files_blocking_chip,
+            self.files_warning_chip,
+            self.files_dirty_chip,
+        ):
+            chip.setObjectName("files_chip")
+            chip.setProperty("chipSeverity", "info")
+            chip_row.addWidget(chip)
+        chip_row.addStretch(1)
+
+        layout.insertLayout(4, chip_row)
+
+    @staticmethod
+    def _set_files_chip_state(chip: QLabel, *, text: str, severity: str) -> None:
+        chip.setText(text)
+        chip.setProperty("chipSeverity", severity)
+        chip.style().unpolish(chip)
+        chip.style().polish(chip)
+        chip.update()
+
+    def _update_files_experiment_chips(self, *, blocking: int, warnings: int, source_label: str) -> None:
+        if not self._is_files_experiment_enabled():
+            return
+        if not hasattr(self, "files_primary_status_chip"):
+            return
+
+        is_cfg = self._is_cfg_label(self.files_current_label, self.files_current_generated_name)
+        dirty = bool(self.app_state_store.snapshot().active_file.dirty)
+        source = source_label or self._current_cfg_target_label()
+        if not self.files_current_content.strip():
+            summary = "No file loaded"
+            severity = "info"
+        elif not is_cfg:
+            summary = "Preview only (non-.cfg file)"
+            severity = "info"
+        elif blocking > 0:
+            summary = f"Action needed: {source}"
+            severity = "error"
+        elif warnings > 0:
+            summary = f"Heads up: {source}"
+            severity = "warning"
+        elif dirty:
+            summary = f"Unsaved changes: {source}"
+            severity = "dirty"
+        else:
+            summary = f"Ready: {source}"
+            severity = "success"
+
+        self._set_files_chip_state(
+            self.files_primary_status_chip,
+            text=summary,
+            severity=severity,
+        )
+        self._set_files_chip_state(
+            self.files_blocking_chip,
+            text=f"Blocking: {max(0, int(blocking))}",
+            severity=("error" if blocking > 0 else "info"),
+        )
+        self._set_files_chip_state(
+            self.files_warning_chip,
+            text=f"Warnings: {max(0, int(warnings))}",
+            severity=("warning" if warnings > 0 else "info"),
+        )
+        self._set_files_chip_state(
+            self.files_dirty_chip,
+            text=("Unsaved" if dirty else "Saved"),
+            severity=("dirty" if dirty else "success"),
+        )
 
     def _build_files_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
-        top_row = QHBoxLayout()
+        self.files_top_command_bar = QWidget(tab)
+        top_row = QHBoxLayout(self.files_top_command_bar)
+        top_row.setContentsMargins(8, 8, 8, 8)
+        top_row.setSpacing(8)
 
-        show_generated_btn = QPushButton("Show Generated Files", tab)
-        show_generated_btn.clicked.connect(self._show_selected_generated_file)
-        top_row.addWidget(show_generated_btn)
+        self.files_show_generated_btn = QPushButton("Show Generated Files", self.files_top_command_bar)
+        self.files_show_generated_btn.clicked.connect(self._show_selected_generated_file)
+        top_row.addWidget(self.files_show_generated_btn)
 
-        self.apply_form_btn = QPushButton("Apply Form Changes", tab)
+        self.apply_form_btn = QPushButton("Apply Form Changes", self.files_top_command_bar)
         self.apply_form_btn.clicked.connect(self._apply_cfg_form_changes)
         top_row.addWidget(self.apply_form_btn)
 
-        self.refactor_cfg_btn = QPushButton("Refactor Current .cfg", tab)
+        self.refactor_cfg_btn = QPushButton("Refactor Current .cfg", self.files_top_command_bar)
         self.refactor_cfg_btn.clicked.connect(self._refactor_current_cfg_file)
         top_row.addWidget(self.refactor_cfg_btn)
 
-        self.validate_cfg_btn = QPushButton("Validate Current .cfg", tab)
-        self.validate_cfg_btn.clicked.connect(self._validate_current_cfg_file)
-        top_row.addWidget(self.validate_cfg_btn)
-
-        self.preview_path_label = QLabel("No file selected.", tab)
+        self.preview_path_label = QLabel("No file selected.", self.files_top_command_bar)
         top_row.addWidget(self.preview_path_label, 1)
 
-        layout.addLayout(top_row)
+        layout.addWidget(self.files_top_command_bar)
+        self.files_breadcrumbs_label = QLabel("Path: none", tab)
+        self.files_breadcrumbs_label.setWordWrap(True)
+        layout.addWidget(self.files_breadcrumbs_label)
 
         profile_row = QHBoxLayout()
         self.machine_profile_name_edit = QLineEdit(tab)
@@ -2335,14 +3596,14 @@ class MainWindow(QMainWindow):
         self.cfg_tools_status_label.setVisible(False)
         layout.addWidget(self.cfg_tools_status_label)
 
-        self.files_validation_notice_label = QLabel("", tab)
-        self.files_validation_notice_label.setWordWrap(True)
-        self.files_validation_notice_label.setVisible(False)
-        layout.addWidget(self.files_validation_notice_label)
-
         splitter = QSplitter(Qt.Horizontal, tab)
+        self.files_splitter = splitter
         self.generated_file_list = QListWidget(splitter)
         self.generated_file_list.itemSelectionChanged.connect(self._on_generated_file_selected)
+        self.generated_file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.generated_file_list.customContextMenuRequested.connect(
+            self._show_generated_files_context_menu
+        )
 
         right_panel = QWidget(splitter)
         right_layout = QVBoxLayout(right_panel)
@@ -2644,7 +3905,7 @@ class MainWindow(QMainWindow):
         discovery_layout.addLayout(discovery_form)
 
         discovery_hint = QLabel(
-            "Use Tools -> Printer Connection -> Scan for Printers / Use Selected Host.",
+            "Use Printer -> Scan Network / Use Selected Host.",
             discovery_group,
         )
         discovery_hint.setWordWrap(True)
@@ -2692,7 +3953,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(options_group)
 
         action_hint = QLabel(
-            "Use Tools -> Printer Connection for Connect, Open Remote File, Explore Config Directory, and Deploy Generated Pack.",
+            "Use Printer + Configuration menus for connect, remote config actions, and deploy workflows.",
             tab,
         )
         action_hint.setWordWrap(True)
@@ -2717,6 +3978,8 @@ class MainWindow(QMainWindow):
         self.ssh_log.setMaximumBlockCount(2000)
         ssh_log_layout.addWidget(self.ssh_log, 1)
         layout.addWidget(ssh_log_section, 1)
+        self.ssh_host_edit.textChanged.connect(self._update_action_enablement)
+        self.ssh_username_edit.textChanged.connect(self._update_action_enablement)
         self._refresh_saved_connection_profiles()
         return tab
 
@@ -2792,16 +4055,19 @@ class MainWindow(QMainWindow):
         self.manage_refactor_file_btn.clicked.connect(self._manage_refactor_current_file)
         action_row.addWidget(self.manage_refactor_file_btn)
 
-        self.manage_validate_file_btn = QPushButton("Validate Current .cfg", tab)
-        self.manage_validate_file_btn.clicked.connect(self._manage_validate_current_file)
-        action_row.addWidget(self.manage_validate_file_btn)
-
         self.manage_open_control_btn = QPushButton("Open Control Window", tab)
         self.manage_open_control_btn.clicked.connect(self._manage_open_control_window)
         action_row.addWidget(self.manage_open_control_btn)
 
         action_row.addStretch(1)
         layout.addLayout(action_row)
+        manage_actions_hint = QLabel(
+            "Primary actions run from command bar: Configuration -> Validate Current, "
+            "Printer -> Upload Current, Printer -> Restart Klipper.",
+            tab,
+        )
+        manage_actions_hint.setWordWrap(True)
+        layout.addWidget(manage_actions_hint)
 
         editor_splitter = QSplitter(Qt.Horizontal, tab)
         self.manage_file_tree = QTreeWidget(editor_splitter)
@@ -2820,6 +4086,7 @@ class MainWindow(QMainWindow):
         self.manage_current_file_label = QLabel("No file loaded.", editor_panel)
         editor_layout.addWidget(self.manage_current_file_label)
         self.manage_file_editor = QPlainTextEdit(editor_panel)
+        self.manage_file_editor.textChanged.connect(self._update_action_enablement)
         editor_layout.addWidget(self.manage_file_editor, 1)
 
         editor_splitter.setStretchFactor(0, 1)
@@ -2932,6 +4199,8 @@ class MainWindow(QMainWindow):
             self._sync_toolhead_controls()
             self._sync_led_controls()
             self._refresh_board_summary()
+            self._update_machine_attribute_views(None)
+            self._update_addon_package_details(None)
             self._render_and_validate()
             return
 
@@ -2966,6 +4235,7 @@ class MainWindow(QMainWindow):
         self._sync_toolhead_controls()
         self._sync_led_controls()
         self._refresh_board_summary()
+        self._update_addon_package_details()
         self._render_and_validate()
 
     def _populate_board_combo(self, board_ids: list[str]) -> None:
@@ -3097,6 +4367,7 @@ class MainWindow(QMainWindow):
         self._render_and_validate()
 
     def _on_addon_checkbox_toggled(self, _addon_name: str, _checked: bool) -> None:
+        self._update_addon_package_details()
         self._render_and_validate()
 
     def _sync_toolhead_controls(self) -> None:
@@ -3125,6 +4396,103 @@ class MainWindow(QMainWindow):
             for name, checkbox in self.addon_checkboxes.items()
             if checkbox.isChecked() and checkbox.isEnabled()
         ]
+
+    @staticmethod
+    def _format_section_value_map(section_map: dict[str, dict[str, str]]) -> str:
+        if not section_map:
+            return "None detected."
+        lines: list[str] = []
+        for section_name, values in section_map.items():
+            lines.append(f"[{section_name}]")
+            if not values:
+                lines.append("  (no key/value entries)")
+                continue
+            for key, value in values.items():
+                rendered = str(value)
+                rendered = rendered.replace("\n", "\\n")
+                lines.append(f"  {key}: {rendered}")
+        return "\n".join(lines)
+
+    def _update_machine_attribute_views(self, project: ProjectConfig | None = None) -> None:
+        if not hasattr(self, "machine_attr_mcu_view"):
+            return
+        active_project = project or self.current_project
+        if active_project is None:
+            self.machine_attr_mcu_view.setPlainText("No machine attributes available.")
+            self.machine_attr_motion_view.setPlainText("No machine attributes available.")
+            self.machine_attr_probe_view.setPlainText("No machine attributes available.")
+            self.machine_attr_thermal_view.setPlainText("No machine attributes available.")
+            return
+
+        attributes = active_project.machine_attributes
+        mcu_lines: list[str] = []
+        for mcu_name, mcu in attributes.mcu_map.items():
+            mcu_lines.append(f"[mcu {mcu_name}]")
+            mcu_lines.append(f"  serial: {mcu.serial or 'None'}")
+            mcu_lines.append(f"  canbus_uuid: {mcu.canbus_uuid or 'None'}")
+            mcu_lines.append(f"  restart_method: {mcu.restart_method or 'None'}")
+        if not mcu_lines:
+            mcu_lines.append("No MCU map entries detected.")
+        self.machine_attr_mcu_view.setPlainText("\n".join(mcu_lines))
+
+        motion_sections = dict(attributes.stepper_sections)
+        motion_sections.update(attributes.driver_sections)
+        self.machine_attr_motion_view.setPlainText(self._format_section_value_map(motion_sections))
+
+        probe_sections = dict(attributes.probe_sections)
+        probe_sections.update(attributes.leveling_sections)
+        self.machine_attr_probe_view.setPlainText(self._format_section_value_map(probe_sections))
+
+        thermal_sections = dict(attributes.thermal_sections)
+        thermal_sections.update(attributes.fan_sections)
+        thermal_sections.update(attributes.sensor_sections)
+        thermal_sections.update(attributes.resonance_sections)
+        self.machine_attr_thermal_view.setPlainText(self._format_section_value_map(thermal_sections))
+
+    def _update_addon_package_details(self, project: ProjectConfig | None = None) -> None:
+        if not hasattr(self, "addon_package_details_view"):
+            return
+        active_project = project
+        if active_project is None:
+            try:
+                active_project = self._build_project_from_ui()
+            except Exception:  # noqa: BLE001
+                active_project = self.current_project
+        if active_project is None:
+            self.addon_package_details_view.setPlainText("No active project.")
+            return
+
+        selected_addons = active_project.addons
+        if not selected_addons:
+            self.addon_package_details_view.setPlainText(
+                "No add-ons enabled. Enable an add-on to view package details."
+            )
+            return
+
+        lines: list[str] = []
+        addon_config_map = active_project.addon_configs.model_dump(mode="json")
+        for addon_id in selected_addons:
+            profile = get_addon_profile(addon_id)
+            lines.append(f"{addon_id}:")
+            if profile is not None:
+                lines.append(f"  label: {profile.label}")
+                lines.append(f"  template: {profile.template}")
+                if profile.include_files:
+                    lines.append(f"  include_files: {', '.join(profile.include_files)}")
+                if profile.package_templates:
+                    lines.append("  package_templates:")
+                    for output_path, template_name in profile.package_templates.items():
+                        lines.append(f"    - {output_path} -> {template_name}")
+                lines.append(f"  learned: {'yes' if profile.learned else 'no'}")
+            config_payload = addon_config_map.get(addon_id)
+            if isinstance(config_payload, dict):
+                include_files = config_payload.get("include_files") or []
+                if include_files:
+                    lines.append(
+                        "  detected_include_files: " + ", ".join(str(item) for item in include_files)
+                    )
+            lines.append("")
+        self.addon_package_details_view.setPlainText("\n".join(lines).strip())
 
     def _build_project_from_ui(self) -> ProjectConfig:
         if self.current_preset is None:
@@ -3211,6 +4579,11 @@ class MainWindow(QMainWindow):
     def _render_and_validate(self) -> None:
         if self.current_preset is None:
             return
+        self.action_log_service.log_event(
+            "generate",
+            phase="start",
+            preset_id=self.current_preset.id,
+        )
 
         try:
             project = self._build_project_from_ui()
@@ -3238,6 +4611,14 @@ class MainWindow(QMainWindow):
             self._update_generated_files_view(None)
             self._update_action_enablement()
             self._refresh_board_summary()
+            self._update_machine_attribute_views(None)
+            self._update_addon_package_details(None)
+            self.action_log_service.log_event(
+                "generate",
+                phase="failed",
+                reason="project_build_failed",
+                blocking=sum(1 for finding in report.findings if finding.severity == "blocking"),
+            )
             return
 
         preset = self.presets_by_id.get(project.preset_id)
@@ -3256,6 +4637,14 @@ class MainWindow(QMainWindow):
             self._update_generated_files_view(None)
             self._update_action_enablement()
             self._refresh_board_summary()
+            self._update_machine_attribute_views(None)
+            self._update_addon_package_details(None)
+            self.action_log_service.log_event(
+                "generate",
+                phase="failed",
+                reason="preset_not_found",
+                preset_id=project.preset_id,
+            )
             return
 
         project_report = self.validation_service.validate_project(project, preset)
@@ -3274,6 +4663,19 @@ class MainWindow(QMainWindow):
 
         combined = ValidationReport(findings=[*project_report.findings, *render_report.findings])
 
+        if (
+            pack is not None
+            and self.current_import_profile is not None
+            and self.imported_file_map
+        ):
+            parity_report = self.parity_service.compare(
+                pack,
+                self.imported_file_map,
+                imported_root_file=self.current_import_profile.root_file,
+                imported_include_graph=self.current_import_profile.include_graph,
+            )
+            combined.findings.extend(parity_report.findings)
+
         self.current_project = project
         self.current_pack = pack
         self.current_report = combined
@@ -3282,6 +4684,23 @@ class MainWindow(QMainWindow):
         self._update_generated_files_view(pack)
         self._update_action_enablement()
         self._refresh_board_summary()
+        self._update_machine_attribute_views(project)
+        self._update_addon_package_details(project)
+        blocking_count = sum(1 for finding in combined.findings if finding.severity == "blocking")
+        warning_count = sum(1 for finding in combined.findings if finding.severity == "warning")
+        self.app_state_store.update_validation(
+            blocking=blocking_count,
+            warnings=warning_count,
+            source_label="compile",
+        )
+        self.action_log_service.log_event(
+            "generate",
+            phase="complete",
+            preset_id=project.preset_id,
+            file_count=(len(pack.files) if pack is not None else 0),
+            blocking=blocking_count,
+            warnings=warning_count,
+        )
         self.statusBar().showMessage("Compile complete", 2500)
 
     def _update_validation_view(self, report: ValidationReport) -> None:
@@ -3328,50 +4747,27 @@ class MainWindow(QMainWindow):
                 title = f"{title} ({total})"
             self.validation_section_toggle.setText(title)
 
-        if not hasattr(self, "files_validation_notice_label"):
-            return
-
-        if total == 0:
-            self.files_validation_notice_label.clear()
-            self.files_validation_notice_label.setVisible(False)
-            self.files_validation_notice_label.setStyleSheet("")
-            return
-
-        plural = "issue" if total == 1 else "issues"
         if blocking_count > 0:
-            message = (
-                f"Validation unresolved: {blocking_count} blocking and {warning_count} warning "
-                f"{plural}. Expand 'Validation Findings' to review."
-            )
-            style = (
-                "QLabel {"
-                " background-color: #7f1d1d;"
-                " color: #ffffff;"
-                " border: 1px solid #ef4444;"
-                " border-radius: 4px;"
-                " padding: 6px 8px;"
-                " font-weight: 600;"
-                "}"
-            )
-        else:
-            message = (
-                f"Validation unresolved: {warning_count} warning {plural}. "
-                "Expand 'Validation Findings' to review."
-            )
-            style = (
-                "QLabel {"
-                " background-color: #78350f;"
-                " color: #ffffff;"
-                " border: 1px solid #f59e0b;"
-                " border-radius: 4px;"
-                " padding: 6px 8px;"
-                " font-weight: 600;"
-                "}"
-            )
+            self._last_warning_toast_snapshot = (blocking_count, warning_count)
+            return
 
-        self.files_validation_notice_label.setText(message)
-        self.files_validation_notice_label.setStyleSheet(style)
-        self.files_validation_notice_label.setVisible(True)
+        snapshot = (blocking_count, warning_count)
+        if warning_count <= 0:
+            self._last_warning_toast_snapshot = snapshot
+            return
+
+        if snapshot == self._last_warning_toast_snapshot:
+            return
+
+        plural = "warning" if warning_count == 1 else "warnings"
+        self._show_toast_notification(
+            (
+                f"Heads up: we found {warning_count} {plural}. "
+                "You can keep going, but open Validation Findings to review them."
+            ),
+            severity="caution",
+        )
+        self._last_warning_toast_snapshot = snapshot
 
     def _update_live_conflict_alert(
         self,
@@ -3385,9 +4781,6 @@ class MainWindow(QMainWindow):
             if self._last_blocking_alert_snapshot:
                 self.statusBar().showMessage("Conflicts resolved", 2500)
             self._last_blocking_alert_snapshot = ()
-            self.conflict_alert_label.clear()
-            self.conflict_alert_label.setVisible(False)
-            self.conflict_alert_label.setStyleSheet("")
             return
 
         message_parts = [
@@ -3397,22 +4790,7 @@ class MainWindow(QMainWindow):
         if len(blocking_findings) > 2:
             message_parts.append(f"+{len(blocking_findings) - 2} more")
 
-        summary = (
-            f"Blocking conflicts ({len(blocking_findings)}). "
-            + " | ".join(message_parts)
-        )
-        self.conflict_alert_label.setText(summary)
-        self.conflict_alert_label.setStyleSheet(
-            "QLabel {"
-            " background-color: #7f1d1d;"
-            " color: #ffffff;"
-            " border: 1px solid #ef4444;"
-            " border-radius: 4px;"
-            " padding: 6px 8px;"
-            " font-weight: 600;"
-            "}"
-        )
-        self.conflict_alert_label.setVisible(True)
+        summary = " | ".join(message_parts)
 
         snapshot = tuple(
             f"{finding.code}|{finding.field or ''}|{finding.message}"
@@ -3420,6 +4798,15 @@ class MainWindow(QMainWindow):
         )
         if snapshot != self._last_blocking_alert_snapshot:
             self.statusBar().showMessage(f"Blocking conflicts: {len(blocking_findings)}", 3000)
+            plural = "issue" if len(blocking_findings) == 1 else "issues"
+            self._show_toast_notification(
+                (
+                    f"Please fix {len(blocking_findings)} critical {plural} before you deploy. "
+                    f"Top item: {summary}"
+                ),
+                severity="warning",
+                duration_ms=5500,
+            )
         self._last_blocking_alert_snapshot = snapshot
 
     def _on_wizard_package_file_selected(self) -> None:
@@ -3519,14 +4906,41 @@ class MainWindow(QMainWindow):
             and self.current_pack is not None
             and not self.current_report.has_blocking
         )
+        can_validate = self._can_validate_current_context()
+        can_upload_generated = self._can_upload_generated_pack()
+        can_upload_current = self._can_upload_current_context()
+        has_ssh_target = self._has_ssh_target_configured()
+        can_restart = self.device_connected and has_ssh_target
+
         if hasattr(self, "export_folder_action"):
             self.export_folder_action.setEnabled(can_output)
         if hasattr(self, "export_zip_action"):
             self.export_zip_action.setEnabled(can_output)
+        if hasattr(self, "file_export_generated_pack_action"):
+            self.file_export_generated_pack_action.setEnabled(can_output)
         if hasattr(self, "tools_deploy_action"):
-            self.tools_deploy_action.setEnabled(can_output)
+            self.tools_deploy_action.setEnabled(can_upload_generated)
+        if hasattr(self, "configuration_validate_action"):
+            self.configuration_validate_action.setEnabled(can_validate)
+        if hasattr(self, "printer_upload_action"):
+            self.printer_upload_action.setEnabled(can_upload_current)
+        if hasattr(self, "printer_connect_action"):
+            self.printer_connect_action.setEnabled(has_ssh_target)
+        if hasattr(self, "printer_disconnect_action"):
+            self.printer_disconnect_action.setEnabled(self.device_connected)
+        if hasattr(self, "printer_restart_klipper_action"):
+            self.printer_restart_klipper_action.setEnabled(can_restart)
+        if hasattr(self, "printer_restart_host_action"):
+            self.printer_restart_host_action.setEnabled(can_restart)
 
     def _on_generated_file_selected(self) -> None:
+        item = self.generated_file_list.currentItem() if hasattr(self, "generated_file_list") else None
+        if item is not None:
+            self.action_log_service.log_event(
+                "files_select",
+                item=item.text(),
+                imported=bool(self._showing_external_file),
+            )
         if self._showing_external_file and self.imported_file_map:
             self._show_selected_imported_file()
             return
@@ -3606,12 +5020,19 @@ class MainWindow(QMainWindow):
         source: str,
         generated_name: str | None,
     ) -> None:
+        previous_label = self.files_current_label
+        previous_source = self.files_current_source
         self.files_current_content = content
         self.files_current_label = label
         self.files_current_source = source
         self.files_current_generated_name = generated_name
+        self.app_state_store.update_active_file(path=label, source=source, dirty=False)
         self.file_preview.setPlainText(content)
         self.preview_path_label.setText(label)
+        if hasattr(self, "files_breadcrumbs_label"):
+            self.files_breadcrumbs_label.setText(
+                f"Path: {self._format_breadcrumbs_label(label, generated_name)}"
+            )
         self._set_persistent_preview_source(
             content=content,
             label=label,
@@ -3624,6 +5045,57 @@ class MainWindow(QMainWindow):
             self._run_current_cfg_validation(show_dialog=False)
         else:
             self._clear_cfg_tools_status()
+        if label != previous_label or source != previous_source:
+            self.action_log_service.log_event(
+                "files_open",
+                source=source,
+                label=label,
+                generated_name=generated_name or "",
+            )
+
+    @staticmethod
+    def _format_breadcrumbs_label(label: str, generated_name: str | None) -> str:
+        if generated_name:
+            return "Generated > " + generated_name.replace("\\", " / ").replace("/", " > ")
+        clean = str(label or "").replace("\\", "/")
+        clean = clean.replace("Generated: ", "")
+        clean = clean.replace("Remote: ", "")
+        clean = clean.replace("Local: ", "")
+        clean = clean.strip()
+        if not clean:
+            return "none"
+        return clean.replace("/", " > ")
+
+    def _show_generated_files_context_menu(self, position) -> None:  # noqa: ANN001
+        item = self.generated_file_list.itemAt(position)
+        if item is None:
+            return
+
+        menu = QMenu(self.generated_file_list)
+        open_action = menu.addAction("Open")
+        validate_action = menu.addAction("Validate Current")
+        refactor_action = menu.addAction("Refactor Current")
+        copy_path_action = menu.addAction("Copy Path")
+        action = menu.exec(self.generated_file_list.mapToGlobal(position))
+        if action is None:
+            return
+
+        self.generated_file_list.setCurrentItem(item)
+        self._show_selected_generated_file()
+
+        if action is open_action:
+            return
+        if action is validate_action:
+            self._validate_current_cfg_file()
+            return
+        if action is refactor_action:
+            self._refactor_current_cfg_file()
+            return
+        if action is copy_path_action:
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(item.text())
+            self.statusBar().showMessage("Copied file path", 1500)
 
     def _current_cfg_target_label(self) -> str:
         if self.files_current_generated_name:
@@ -3649,54 +5121,107 @@ class MainWindow(QMainWindow):
         self.cfg_tools_status_label.clear()
         self.cfg_tools_status_label.setStyleSheet("")
         self.cfg_tools_status_label.setVisible(False)
+        self._update_files_experiment_chips(blocking=0, warnings=0, source_label="")
 
     def _update_cfg_tools_status(self, report: ValidationReport, source_label: str) -> None:
         blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
         warnings = sum(1 for finding in report.findings if finding.severity == "warning")
         total = blocking + warnings
 
-        if total == 0:
-            message = f"{source_label}: no firmware validation issues."
-            style = (
-                "QLabel {"
-                " background-color: #14532d;"
-                " color: #ffffff;"
-                " border: 1px solid #16a34a;"
-                " border-radius: 4px;"
-                " padding: 6px 8px;"
-                " font-weight: 600;"
-                "}"
-            )
-        elif blocking > 0:
-            message = (
-                f"{source_label}: {blocking} blocking and {warnings} warning issue(s) found."
-            )
-            style = (
-                "QLabel {"
-                " background-color: #7f1d1d;"
-                " color: #ffffff;"
-                " border: 1px solid #ef4444;"
-                " border-radius: 4px;"
-                " padding: 6px 8px;"
-                " font-weight: 600;"
-                "}"
-            )
+        if self._is_files_experiment_enabled():
+            if total == 0:
+                message = f"Looks good: {source_label} has no validation issues."
+                style = (
+                    "QLabel {"
+                    " background-color: #14532d;"
+                    " color: #ffffff;"
+                    " border: 1px solid #16a34a;"
+                    " border-radius: 8px;"
+                    " padding: 8px 10px;"
+                    " font-weight: 600;"
+                    "}"
+                )
+            elif blocking > 0:
+                plural_blocking = "issue" if blocking == 1 else "issues"
+                plural_warning = "warning" if warnings == 1 else "warnings"
+                message = (
+                    f"Action needed: fix {blocking} critical {plural_blocking} before upload. "
+                    f"We also found {warnings} {plural_warning}."
+                )
+                style = (
+                    "QLabel {"
+                    " background-color: #7f1d1d;"
+                    " color: #ffffff;"
+                    " border: 1px solid #ef4444;"
+                    " border-radius: 8px;"
+                    " padding: 8px 10px;"
+                    " font-weight: 600;"
+                    "}"
+                )
+            else:
+                plural_warning = "warning" if warnings == 1 else "warnings"
+                message = (
+                    f"Heads up: we found {warnings} {plural_warning}. "
+                    "You can keep editing, but review them before upload."
+                )
+                style = (
+                    "QLabel {"
+                    " background-color: #78350f;"
+                    " color: #ffffff;"
+                    " border: 1px solid #f59e0b;"
+                    " border-radius: 8px;"
+                    " padding: 8px 10px;"
+                    " font-weight: 600;"
+                    "}"
+                )
         else:
-            message = f"{source_label}: warnings only ({warnings})."
-            style = (
-                "QLabel {"
-                " background-color: #78350f;"
-                " color: #ffffff;"
-                " border: 1px solid #f59e0b;"
-                " border-radius: 4px;"
-                " padding: 6px 8px;"
-                " font-weight: 600;"
-                "}"
-            )
+            if total == 0:
+                message = f"{source_label}: no firmware validation issues."
+                style = (
+                    "QLabel {"
+                    " background-color: #14532d;"
+                    " color: #ffffff;"
+                    " border: 1px solid #16a34a;"
+                    " border-radius: 4px;"
+                    " padding: 6px 8px;"
+                    " font-weight: 600;"
+                    "}"
+                )
+            elif blocking > 0:
+                message = (
+                    f"{source_label}: {blocking} blocking and {warnings} warning issue(s) found."
+                )
+                style = (
+                    "QLabel {"
+                    " background-color: #7f1d1d;"
+                    " color: #ffffff;"
+                    " border: 1px solid #ef4444;"
+                    " border-radius: 4px;"
+                    " padding: 6px 8px;"
+                    " font-weight: 600;"
+                    "}"
+                )
+            else:
+                message = f"{source_label}: warnings only ({warnings})."
+                style = (
+                    "QLabel {"
+                    " background-color: #78350f;"
+                    " color: #ffffff;"
+                    " border: 1px solid #f59e0b;"
+                    " border-radius: 4px;"
+                    " padding: 6px 8px;"
+                    " font-weight: 600;"
+                    "}"
+                )
 
         self.cfg_tools_status_label.setText(message)
         self.cfg_tools_status_label.setStyleSheet(style)
         self.cfg_tools_status_label.setVisible(True)
+        self._update_files_experiment_chips(
+            blocking=blocking,
+            warnings=warnings,
+            source_label=source_label,
+        )
 
     @staticmethod
     def _build_cfg_validation_details(report: ValidationReport, limit: int = 8) -> str:
@@ -3714,6 +5239,7 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _run_current_cfg_validation(self, show_dialog: bool) -> ValidationReport | None:
+        self.app_state_store.update_ui(right_panel_mode="validation")
         context = self._current_cfg_context(show_error=show_dialog)
         if context is None:
             return None
@@ -3746,6 +5272,25 @@ class MainWindow(QMainWindow):
 
         blocking = sum(1 for finding in report.findings if finding.severity == "blocking")
         warnings = sum(1 for finding in report.findings if finding.severity == "warning")
+        self.app_state_store.update_validation(
+            blocking=blocking,
+            warnings=warnings,
+            source_label=status_source_label,
+        )
+        self.action_log_service.log_event(
+            "validate",
+            source=status_source_label,
+            blocking=blocking,
+            warnings=warnings,
+            triggered_by="dialog" if show_dialog else "background",
+        )
+        self.action_log_service.log_event(
+            "files_validate",
+            source=status_source_label,
+            blocking=blocking,
+            warnings=warnings,
+            triggered_by="dialog" if show_dialog else "background",
+        )
         self._set_preview_validation_state(
             preview_key,
             blocking=blocking,
@@ -3797,6 +5342,20 @@ class MainWindow(QMainWindow):
                 source=self.files_current_source,
                 generated_name=self.files_current_generated_name,
             )
+            self.app_state_store.update_active_file(
+                path=self.files_current_label,
+                source=self.files_current_source,
+                dirty=True,
+            )
+            self._update_files_experiment_chips(
+                blocking=sum(
+                    1 for finding in self.current_cfg_report.findings if finding.severity == "blocking"
+                ),
+                warnings=sum(
+                    1 for finding in self.current_cfg_report.findings if finding.severity == "warning"
+                ),
+                source_label=self._current_cfg_target_label(),
+            )
             if (
                 self.files_current_source == "generated"
                 and self.current_pack is not None
@@ -3806,6 +5365,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Refactored {source_label} ({changes} change(s))", 3000)
         else:
             self.statusBar().showMessage(f"No refactor changes for {source_label}", 2500)
+        self.action_log_service.log_event(
+            "files_refactor",
+            source=source_label,
+            changes=int(changes),
+        )
         self._run_current_cfg_validation(show_dialog=False)
 
     @staticmethod
@@ -3961,6 +5525,21 @@ class MainWindow(QMainWindow):
         ):
             self.current_pack.files[self.files_current_generated_name] = updated
 
+        self.app_state_store.update_active_file(
+            path=self.files_current_label,
+            source=self.files_current_source,
+            dirty=True,
+        )
+        self.action_log_service.log_event(
+            "files_apply_form",
+            source=self.files_current_label,
+            field_count=len(self.cfg_form_editors),
+        )
+        self._update_files_experiment_chips(
+            blocking=sum(1 for finding in self.current_cfg_report.findings if finding.severity == "blocking"),
+            warnings=sum(1 for finding in self.current_cfg_report.findings if finding.severity == "warning"),
+            source_label=self._current_cfg_target_label(),
+        )
         self.statusBar().showMessage("Applied form changes to current file view", 2500)
         self._run_current_cfg_validation(show_dialog=False)
 
@@ -4026,28 +5605,16 @@ class MainWindow(QMainWindow):
             self.export_status_label.setText(f"ZIP export complete: {zip_path}")
         self.statusBar().showMessage("Exported zip", 2500)
     def _save_project_to_file(self) -> None:
-        try:
-            project = self._build_project_from_ui()
-        except (ValidationError, ValueError) as exc:
-            self._show_error("Save Failed", str(exc))
-            return
-
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Project",
-            str(Path.home() / "klippconfig-project.json"),
+            self.current_project_path or str(Path.home() / "klippconfig-project.json"),
             "KlippConfig project (*.json)",
         )
         if not file_path:
             return
 
-        try:
-            self.project_store.save(file_path, project)
-        except OSError as exc:
-            self._show_error("Save Failed", str(exc))
-            return
-
-        self.statusBar().showMessage(f"Saved project: {file_path}", 2500)
+        self._save_project_to_path(file_path)
 
     def _load_project_from_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -4066,6 +5633,7 @@ class MainWindow(QMainWindow):
             return
 
         self._apply_project_to_ui(project)
+        self.current_project_path = file_path
         self._render_and_validate()
         self.statusBar().showMessage(f"Loaded project: {file_path}", 2500)
 
@@ -4085,6 +5653,7 @@ class MainWindow(QMainWindow):
         self.led_initial_green_spin.setValue(0.0)
         self.led_initial_blue_spin.setValue(0.0)
         self._sync_led_controls()
+        self.current_project_path = None
         self.statusBar().showMessage("New project ready", 2500)
 
     def _apply_project_to_ui(self, project: ProjectConfig) -> None:
@@ -5414,6 +6983,15 @@ class MainWindow(QMainWindow):
         backup_root = self.modify_backup_root_edit.text().strip() or "~/klippconfig_backups"
         remote_dir = posixpath.dirname(remote_path.rstrip("/")) or "."
 
+        self.app_state_store.update_deploy(upload_in_progress=True)
+        self.action_log_service.log_event(
+            "upload",
+            phase="start",
+            mode="modify_existing",
+            host=str(params["host"]),
+            remote_dir=remote_dir,
+            remote_path=remote_path,
+        )
         self._append_modify_log(f"Creating backup from {remote_dir} into {backup_root}.")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -5428,10 +7006,22 @@ class MainWindow(QMainWindow):
                 **params,
             )
         except SSHDeployError as exc:
+            self.app_state_store.update_deploy(
+                upload_in_progress=False,
+                last_upload_status=f"failed: {exc}",
+            )
             self._set_device_connection_health(False, str(exc))
             self._set_modify_status(str(exc), severity="error")
             self._append_modify_log(f"Upload failed: {exc}")
             self._show_error("Modify Existing", str(exc))
+            self.action_log_service.log_event(
+                "upload",
+                phase="failed",
+                mode="modify_existing",
+                host=str(params["host"]),
+                remote_path=remote_path,
+                error=str(exc),
+            )
             return
         finally:
             QApplication.restoreOverrideCursor()
@@ -5451,6 +7041,18 @@ class MainWindow(QMainWindow):
             f"Uploaded {saved_path} (backup: {backup_path})",
             severity="ok",
         )
+        self.app_state_store.update_deploy(
+            upload_in_progress=False,
+            last_upload_status=f"uploaded:{saved_path}",
+        )
+        self.action_log_service.log_event(
+            "upload",
+            phase="complete",
+            mode="modify_existing",
+            host=str(params["host"]),
+            remote_path=saved_path,
+            backup_path=str(backup_path),
+        )
         self._set_device_connection_health(True, f"Uploaded {saved_path}.")
         self.statusBar().showMessage("Modify workflow upload complete", 3000)
 
@@ -5463,6 +7065,13 @@ class MainWindow(QMainWindow):
             return
 
         restart_command = self.ssh_restart_cmd_edit.text().strip() or "sudo systemctl restart klipper"
+        self.action_log_service.log_event(
+            "restart",
+            phase="start",
+            action_name="Modify Existing Restart",
+            command=restart_command,
+            host=str(params["host"]),
+        )
         self._append_modify_log(f"Running restart/status command: {restart_command}")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -5471,15 +7080,33 @@ class MainWindow(QMainWindow):
                 **params,
             ).strip()
         except SSHDeployError as exc:
+            self.app_state_store.update_deploy(last_restart_status=f"failed: {exc}")
             self._set_device_connection_health(False, str(exc))
             self._set_modify_status(str(exc), severity="error")
             self._append_modify_log(f"Restart test failed: {exc}")
             self._show_error("Modify Existing", str(exc))
+            self.action_log_service.log_event(
+                "restart",
+                phase="failed",
+                action_name="Modify Existing Restart",
+                command=restart_command,
+                host=str(params["host"]),
+                error=str(exc),
+            )
             return
         finally:
             QApplication.restoreOverrideCursor()
 
         summary = output or "(no output)"
+        self.app_state_store.update_deploy(last_restart_status=summary)
+        self.action_log_service.log_event(
+            "restart",
+            phase="complete",
+            action_name="Modify Existing Restart",
+            command=restart_command,
+            host=str(params["host"]),
+            output=summary,
+        )
         self._set_modify_status(f"Restart command succeeded: {summary}", severity="ok")
         self._append_modify_log(f"Restart output: {summary}")
         self._set_device_connection_health(True, f"Restart command succeeded on {params['host']}.")
@@ -5503,6 +7130,13 @@ class MainWindow(QMainWindow):
         if params is None:
             return
 
+        self.action_log_service.log_event(
+            "connect",
+            phase="start",
+            host=str(params["host"]),
+            username=str(params["username"]),
+            port=int(params["port"]),
+        )
         self._append_ssh_log(
             f"Connecting to {params['username']}@{params['host']}:{params['port']}"
         )
@@ -5518,6 +7152,12 @@ class MainWindow(QMainWindow):
             self._append_modify_log(f"Connect failed: {exc}")
             self._set_modify_status(str(exc), severity="error")
             self._show_error("SSH Connect Failed", str(exc))
+            self.action_log_service.log_event(
+                "connect",
+                phase="failed",
+                host=str(params["host"]),
+                error=str(exc),
+            )
             return
 
         if ok:
@@ -5544,6 +7184,13 @@ class MainWindow(QMainWindow):
             self._set_modify_status(f"Connected to {printer_name}", severity="ok")
             self._save_successful_connection_profile()
             self.statusBar().showMessage(f"Connected to {printer_name}", 2500)
+            self.action_log_service.log_event(
+                "connect",
+                phase="complete",
+                host=str(params["host"]),
+                printer_name=printer_name,
+                output=str(output),
+            )
             return
         self._set_device_connection_health(False, str(output))
         self.preview_connected_printer_name = None
@@ -5553,6 +7200,12 @@ class MainWindow(QMainWindow):
         self._append_ssh_log(f"Connection failed: {output}")
         self._append_modify_log(f"Connection failed: {output}")
         self._set_modify_status(f"Connection failed: {output}", severity="error")
+        self.action_log_service.log_event(
+            "connect",
+            phase="failed",
+            host=str(params["host"]),
+            output=str(output),
+        )
 
     def _test_ssh_connection(self) -> None:
         self._connect_ssh_to_host()
@@ -5592,6 +7245,7 @@ class MainWindow(QMainWindow):
         self._set_device_connection_health(True, f"Opened remote file {remote_path}.")
 
     def _deploy_generated_pack(self) -> None:
+        self.app_state_store.update_ui(active_route="deploy", right_panel_mode="logs")
         if not self._ensure_export_ready():
             return
 
@@ -5609,6 +7263,14 @@ class MainWindow(QMainWindow):
             return
 
         assert self.current_pack is not None
+        self.app_state_store.update_deploy(upload_in_progress=True)
+        self.action_log_service.log_event(
+            "upload",
+            phase="start",
+            host=str(params["host"]),
+            remote_dir=remote_dir,
+            file_count=len(self.current_pack.files),
+        )
         self._append_ssh_log(
             f"Deploying {len(self.current_pack.files)} files to {params['host']}:{remote_dir}"
         )
@@ -5623,9 +7285,20 @@ class MainWindow(QMainWindow):
                 **params,
             )
         except SSHDeployError as exc:
+            self.app_state_store.update_deploy(
+                upload_in_progress=False,
+                last_upload_status=f"failed: {exc}",
+            )
             self._set_device_connection_health(False, str(exc))
             self._append_ssh_log(str(exc))
             self._show_error("Deploy Failed", str(exc))
+            self.action_log_service.log_event(
+                "upload",
+                phase="failed",
+                host=str(params["host"]),
+                remote_dir=remote_dir,
+                error=str(exc),
+            )
             return
 
         uploaded = result.get("uploaded", [])
@@ -5637,6 +7310,20 @@ class MainWindow(QMainWindow):
         self._append_ssh_log(f"Uploaded {len(uploaded)} files.")
         if restart_output:
             self._append_ssh_log(f"Restart output: {restart_output}")
+        self.app_state_store.update_deploy(
+            upload_in_progress=False,
+            last_upload_status=f"uploaded:{len(uploaded)}",
+            last_restart_status=str(restart_output or ""),
+        )
+        self.action_log_service.log_event(
+            "upload",
+            phase="complete",
+            host=str(params["host"]),
+            remote_dir=remote_dir,
+            uploaded_count=len(uploaded),
+            backup_path=str(backup_path or ""),
+            restart_output=str(restart_output or ""),
+        )
         self._set_device_connection_health(True, f"Deployed to {params['host']}.")
         self.statusBar().showMessage("Deploy complete", 2500)
 
@@ -5664,6 +7351,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
         self._persist_preview_settings()
+        self.app_state_store.unsubscribe(self._on_app_state_changed)
         super().closeEvent(event)
 
     def _show_error(self, title: str, message: str) -> None:

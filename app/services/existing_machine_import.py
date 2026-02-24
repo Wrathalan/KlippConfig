@@ -12,6 +12,7 @@ from app.services.board_registry import (
     list_main_boards,
 )
 from app.services.config_graph import ConfigGraphService
+from app.services.klipper_ast import parse_klipper_config
 
 
 class ExistingMachineImportError(Exception):
@@ -105,23 +106,18 @@ class ExistingMachineImportService:
 
     def _parse_sections(self, content: str) -> dict[str, dict[str, str]]:
         sections: dict[str, dict[str, str]] = {}
-        current_section: str | None = None
-        for raw_line in (content or "").splitlines():
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith(("#", ";")):
-                continue
-            section_match = self.SECTION_PATTERN.match(raw_line)
-            if section_match:
-                current_section = section_match.group(1).strip().lower()
-                sections.setdefault(current_section, {})
-                continue
-            if raw_line[:1].isspace():
-                continue
-            key_match = self.KEY_VALUE_PATTERN.match(raw_line)
-            if key_match and current_section:
-                key = key_match.group(1).strip().lower()
-                value = key_match.group(2).strip()
-                sections.setdefault(current_section, {})[key] = value
+        document = parse_klipper_config(content or "")
+        for section in document.sections:
+            section_name = section.name.strip().lower()
+            bucket = sections.setdefault(section_name, {})
+            for entry in section.entries:
+                if entry.kind != "key_value" or entry.key_value is None:
+                    continue
+                key = entry.key_value.key.strip().lower()
+                value = entry.key_value.value
+                if entry.key_value.continuations:
+                    value = "\n".join([value, *entry.key_value.continuations])
+                bucket[key] = value.strip()
         return sections
 
     @staticmethod
@@ -161,6 +157,44 @@ class ExistingMachineImportService:
                 merged.setdefault(section_name, {})
                 merged[section_name].update(values)
         return merged
+
+    def _collect_section_map(
+        self,
+        files: dict[str, str],
+        include_graph: dict[str, list[str]],
+        root_file: str,
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        section_map: dict[str, dict[str, dict[str, str]]] = {}
+        flattened = self.graph_service.flatten_graph(include_graph, root_file)
+        for file_path in flattened:
+            content = files.get(file_path)
+            if content is None:
+                continue
+            document = parse_klipper_config(content)
+            per_file: dict[str, dict[str, str]] = {}
+            for section in document.sections:
+                section_values: dict[str, str] = {}
+                for entry in section.entries:
+                    if entry.kind != "key_value" or entry.key_value is None:
+                        continue
+                    value = entry.key_value.value
+                    if entry.key_value.continuations:
+                        value = "\n".join([value, *entry.key_value.continuations])
+                    section_values[entry.key_value.key] = value
+                per_file[section.name] = section_values
+            section_map[file_path] = per_file
+        return section_map
+
+    @staticmethod
+    def _collect_matching_sections(
+        merged_sections: dict[str, dict[str, str]],
+        predicate,
+    ) -> dict[str, dict[str, str]]:
+        out: dict[str, dict[str, str]] = {}
+        for section_name, values in merged_sections.items():
+            if predicate(section_name):
+                out[section_name] = dict(values)
+        return out
 
     def _score_mainboard(
         self,
@@ -241,8 +275,6 @@ class ExistingMachineImportService:
                 include_value = include_match.group(1).strip().lower()
                 if "kamp" in include_value:
                     mark("kamp", 0.92, "KAMP include chain detected.", file_path)
-                if "afc/" in include_value or include_value.startswith("afc"):
-                    mark("afc", 0.95, "AFC include chain detected.", file_path)
                 if "stealthburner_leds.cfg" in include_value:
                     mark(
                         "stealthburner_leds",
@@ -254,8 +286,6 @@ class ExistingMachineImportService:
                     mark("timelapse", 0.9, "Timelapse include detected.", file_path)
 
             lowered = content.lower()
-            if "[afc]" in lowered or "[afc_prep]" in lowered:
-                mark("afc", 0.95, "AFC macro sections detected.", file_path)
             if "[afc_boxturtle" in lowered:
                 mark("box_turtle", 0.94, "AFC BoxTurtle section detected.", file_path)
             if "[gcode_macro _kamp_settings]" in lowered:
@@ -272,8 +302,6 @@ class ExistingMachineImportService:
 
         if "afc_boxturtle" in lowered_text:
             mark("box_turtle", 0.95, "AFC_BoxTurtle markers detected.", "graph")
-        if "afc" in lowered_text and "box_turtle" not in addons:
-            mark("afc", 0.86, "AFC markers detected.", "graph")
         if "kamp" in lowered_text or "kamp" in file_blob:
             mark("kamp", 0.86, "KAMP markers detected.", "graph")
         if "timelapse" in lowered_text or "timelapse.cfg" in file_blob:
@@ -294,6 +322,7 @@ class ExistingMachineImportService:
         flattened_files = [path for path in flattened if path in files]
         combined_text = "\n".join(files[path] for path in flattened_files).lower()
         merged_sections = self._merge_section_maps(files, include_graph, root_file)
+        section_map = self._collect_section_map(files, include_graph, root_file)
 
         printer_section = merged_sections.get("printer", {})
         kinematics = printer_section.get("kinematics", "").strip().lower()
@@ -316,6 +345,29 @@ class ExistingMachineImportService:
         inferred_z = int(round(z_max)) if z_max is not None else None
         if inferred_z is None and inferred_xy in {250, 300, 350}:
             inferred_z = 300 if inferred_xy in {250, 300} else 330
+
+        printer_limits = {
+            "max_velocity": self._as_float(printer_section.get("max_velocity")) or 300.0,
+            "max_accel": self._as_float(printer_section.get("max_accel")) or 3000.0,
+            "max_z_velocity": self._as_float(printer_section.get("max_z_velocity")),
+            "max_z_accel": self._as_float(printer_section.get("max_z_accel")),
+            "square_corner_velocity": self._as_float(printer_section.get("square_corner_velocity"))
+            or 5.0,
+        }
+
+        mcu_map: dict[str, dict[str, Any]] = {}
+        for section_name, section_values in merged_sections.items():
+            if section_name == "mcu":
+                alias = "mcu"
+            elif section_name.startswith("mcu "):
+                alias = section_name.split(" ", 1)[1].strip()
+            else:
+                continue
+            mcu_map[alias] = {
+                "serial": (section_values.get("serial") or "").strip() or None,
+                "canbus_uuid": (section_values.get("canbus_uuid") or "").strip() or None,
+                "restart_method": (section_values.get("restart_method") or "").strip() or None,
+            }
 
         preset_id: str | None = None
         preset_confidence = 0.0
@@ -363,16 +415,6 @@ class ExistingMachineImportService:
                 toolhead_reason = "Nitehawk/nhk pin aliases detected."
 
         addons = self._detect_addons(files, include_graph, combined_text)
-        if any(addon_id == "box_turtle" for addon_id, *_ in addons):
-            # AFC BoxTurtle implies AFC stack, but avoid a multi-material conflict by only
-            # auto-applying box_turtle and keeping AFC as manual when both are present.
-            adjusted: list[tuple[str, float, str, str]] = []
-            for addon_id, conf, reason, source in addons:
-                if addon_id == "afc":
-                    adjusted.append((addon_id, min(conf, 0.84), reason, source))
-                else:
-                    adjusted.append((addon_id, conf, reason, source))
-            addons = adjusted
 
         probe_enabled = "probe" in merged_sections
         probe_type: str | None = None
@@ -387,10 +429,129 @@ class ExistingMachineImportService:
             elif "nhk:" in probe_pin or "gpio" in probe_pin:
                 probe_type = "inductive"
 
+        hotend_thermistor = (merged_sections.get("extruder", {}).get("sensor_type") or "").strip() or None
+        bed_thermistor = (merged_sections.get("heater_bed", {}).get("sensor_type") or "").strip() or None
+
         dimensions = {
             "x": int(inferred_xy) if inferred_xy else None,
             "y": int(inferred_xy) if inferred_xy else None,
             "z": int(inferred_z) if inferred_z else None,
+        }
+
+        stepper_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name.startswith("stepper_") or name == "extruder",
+        )
+        driver_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name.startswith("tmc2209 "),
+        )
+        probe_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name.startswith("probe"),
+        )
+        leveling_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name in {"safe_z_home", "quad_gantry_level", "bed_mesh"},
+        )
+        thermal_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name in {"extruder", "heater_bed"},
+        )
+        fan_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name == "fan" or name.startswith("heater_fan ") or name.startswith("controller_fan "),
+        )
+        sensor_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name.startswith("temperature_sensor ") or name.startswith("thermistor "),
+        )
+        resonance_sections = self._collect_matching_sections(
+            merged_sections,
+            lambda name: name in {"input_shaper", "resonance_tester", "adxl345"},
+        )
+
+        typed_sections: set[str] = {
+            "printer",
+            *(name for name in merged_sections if name == "mcu" or name.startswith("mcu ")),
+            *stepper_sections.keys(),
+            *driver_sections.keys(),
+            *probe_sections.keys(),
+            *leveling_sections.keys(),
+            *thermal_sections.keys(),
+            *fan_sections.keys(),
+            *sensor_sections.keys(),
+            *resonance_sections.keys(),
+        }
+        typed_sections = {section.lower() for section in typed_sections}
+
+        unmapped_sections: dict[str, list[str]] = {}
+        section_count = 0
+        for file_path, file_sections in section_map.items():
+            pending: list[str] = []
+            for section_name in file_sections.keys():
+                section_count += 1
+                lowered = section_name.strip().lower()
+                if lowered.startswith("include "):
+                    continue
+                if lowered in typed_sections:
+                    continue
+                pending.append(section_name)
+            if pending:
+                unmapped_sections[file_path] = pending
+
+        addon_configs: dict[str, dict[str, Any]] = {
+            "kamp": {"enabled": False, "include_files": [], "sections": {}},
+            "stealthburner_leds": {"enabled": False, "include_files": [], "sections": {}},
+            "timelapse": {"enabled": False, "include_files": [], "sections": {}},
+        }
+        detected_addon_ids = {addon_id for addon_id, *_ in addons}
+        if "kamp" in detected_addon_ids:
+            addon_configs["kamp"]["enabled"] = True
+        if "stealthburner_leds" in detected_addon_ids:
+            addon_configs["stealthburner_leds"]["enabled"] = True
+        if "timelapse" in detected_addon_ids:
+            addon_configs["timelapse"]["enabled"] = True
+
+        for file_path, file_sections in section_map.items():
+            lowered_path = file_path.lower()
+            addon_key: str | None = None
+            if "/kamp/" in lowered_path or lowered_path.endswith("kamp_settings.cfg"):
+                addon_key = "kamp"
+            elif "stealthburner_leds.cfg" in lowered_path:
+                addon_key = "stealthburner_leds"
+            elif "timelapse.cfg" in lowered_path:
+                addon_key = "timelapse"
+            if addon_key is None:
+                continue
+            addon_configs[addon_key]["include_files"].append(file_path)
+            addon_configs[addon_key]["sections"].update(file_sections)
+
+        for addon_key in addon_configs:
+            deduped = list(dict.fromkeys(addon_configs[addon_key]["include_files"]))
+            addon_configs[addon_key]["include_files"] = deduped
+
+        machine_attributes = {
+            "root_file": root_file,
+            "include_graph": include_graph,
+            "printer_limits": printer_limits,
+            "mcu_map": mcu_map,
+            "stepper_sections": stepper_sections,
+            "driver_sections": driver_sections,
+            "probe_sections": probe_sections,
+            "leveling_sections": leveling_sections,
+            "thermal_sections": thermal_sections,
+            "fan_sections": fan_sections,
+            "sensor_sections": sensor_sections,
+            "resonance_sections": resonance_sections,
+        }
+        parity_metadata = {
+            "source_section_count": section_count,
+            "typed_section_count": sum(
+                1 for section_name in merged_sections if section_name.lower() in typed_sections
+            ),
+            "unmapped_section_count": sum(len(items) for items in unmapped_sections.values()),
+            "source_file_count": len(section_map),
         }
 
         return {
@@ -417,6 +578,15 @@ class ExistingMachineImportService:
                 "enabled": probe_enabled,
                 "type": probe_type,
             },
+            "thermistors": {
+                "hotend": hotend_thermistor,
+                "bed": bed_thermistor,
+            },
+            "machine_attributes": machine_attributes,
+            "addon_configs": addon_configs,
+            "section_map": section_map,
+            "unmapped_sections": unmapped_sections,
+            "parity_metadata": parity_metadata,
             "addons": [
                 {
                     "id": addon_id,
@@ -491,6 +661,25 @@ class ExistingMachineImportService:
     def _build_suggestions(self, detected: dict[str, Any], root_file: str) -> list[ImportSuggestion]:
         suggestions: list[ImportSuggestion] = []
 
+        suggestions.append(
+            self._make_suggestion(
+                field="schema_version",
+                value=2,
+                confidence=1.0,
+                reason="Project config upgraded to schema v2.",
+                source_file=root_file,
+            )
+        )
+        suggestions.append(
+            self._make_suggestion(
+                field="output_layout",
+                value="source_tree",
+                confidence=0.95,
+                reason="Source-like output layout selected for reconstructed firmware.",
+                source_file=root_file,
+            )
+        )
+
         preset_id = detected.get("preset_id")
         if isinstance(preset_id, str) and preset_id:
             suggestions.append(
@@ -530,6 +719,31 @@ class ExistingMachineImportService:
                             source_file=root_file,
                         )
                     )
+
+        thermistors = detected.get("thermistors")
+        if isinstance(thermistors, dict):
+            hotend = thermistors.get("hotend")
+            if isinstance(hotend, str) and hotend.strip():
+                suggestions.append(
+                    self._make_suggestion(
+                        field="thermistors.hotend",
+                        value=hotend.strip(),
+                        confidence=0.88,
+                        reason="Detected hotend thermistor sensor_type from existing config.",
+                        source_file=root_file,
+                    )
+                )
+            bed = thermistors.get("bed")
+            if isinstance(bed, str) and bed.strip():
+                suggestions.append(
+                    self._make_suggestion(
+                        field="thermistors.bed",
+                        value=bed.strip(),
+                        confidence=0.88,
+                        reason="Detected bed thermistor sensor_type from existing config.",
+                        source_file=root_file,
+                    )
+                )
 
         probe = detected.get("probe")
         if isinstance(probe, dict):
@@ -592,6 +806,42 @@ class ExistingMachineImportService:
                     )
                 )
 
+        machine_attributes = detected.get("machine_attributes")
+        if isinstance(machine_attributes, dict) and machine_attributes:
+            suggestions.append(
+                self._make_suggestion(
+                    field="machine_attributes",
+                    value=machine_attributes,
+                    confidence=0.9,
+                    reason="Detected machine attribute map (MCUs, motion, drivers, probes, sensors).",
+                    source_file=root_file,
+                )
+            )
+
+        addon_configs = detected.get("addon_configs")
+        if isinstance(addon_configs, dict) and addon_configs:
+            suggestions.append(
+                self._make_suggestion(
+                    field="addon_configs",
+                    value=addon_configs,
+                    confidence=0.9,
+                    reason="Detected add-on package sections and include files.",
+                    source_file=root_file,
+                )
+            )
+
+        section_map = detected.get("section_map")
+        if isinstance(section_map, dict) and section_map:
+            suggestions.append(
+                self._make_suggestion(
+                    field="section_map",
+                    value=section_map,
+                    confidence=0.93,
+                    reason="Captured source section map for parity reconstruction.",
+                    source_file=root_file,
+                )
+            )
+
         addons = detected.get("addons")
         if isinstance(addons, list):
             for addon in addons:
@@ -648,6 +898,16 @@ class ExistingMachineImportService:
             suggestions=suggestions,
             include_graph=include_graph,
             analysis_warnings=warnings,
+            unmapped_sections=(
+                detected.get("unmapped_sections")
+                if isinstance(detected.get("unmapped_sections"), dict)
+                else {}
+            ),
+            parity_metadata=(
+                detected.get("parity_metadata")
+                if isinstance(detected.get("parity_metadata"), dict)
+                else {}
+            ),
         )
         self.last_import_files = normalized_files
         return profile

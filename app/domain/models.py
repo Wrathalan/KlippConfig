@@ -54,6 +54,10 @@ class AddonProfile(BaseModel):
     recommends_toolhead: bool = False
     supported_families: list[str] = Field(default_factory=lambda: ["voron"])
     supported_presets: list[str] = Field(default_factory=list)
+    include_files: list[str] = Field(default_factory=list)
+    package_templates: dict[str, str] = Field(default_factory=dict)
+    output_files: list[str] = Field(default_factory=list)
+    learned: bool = False
 
 
 class Preset(BaseModel):
@@ -117,7 +121,50 @@ class LEDConfig(BaseModel):
     initial_blue: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
-class ProjectConfig(BaseModel):
+class PrinterLimitsConfig(BaseModel):
+    max_velocity: float = Field(default=300.0, gt=0)
+    max_accel: float = Field(default=3000.0, gt=0)
+    max_z_velocity: float | None = Field(default=None, gt=0)
+    max_z_accel: float | None = Field(default=None, gt=0)
+    square_corner_velocity: float = Field(default=5.0, gt=0)
+
+
+class MCUMapEntry(BaseModel):
+    serial: str | None = None
+    canbus_uuid: str | None = None
+    restart_method: str | None = None
+
+
+class MachineAttributes(BaseModel):
+    root_file: str = "printer.cfg"
+    include_graph: dict[str, list[str]] = Field(default_factory=dict)
+    printer_limits: PrinterLimitsConfig = Field(default_factory=PrinterLimitsConfig)
+    mcu_map: dict[str, MCUMapEntry] = Field(default_factory=dict)
+    stepper_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    driver_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    probe_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    leveling_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    thermal_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    fan_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    sensor_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+    resonance_sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
+class AddonPackageConfig(BaseModel):
+    enabled: bool = False
+    include_files: list[str] = Field(default_factory=list)
+    sections: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
+class AddonConfigSet(BaseModel):
+    kamp: AddonPackageConfig = Field(default_factory=AddonPackageConfig)
+    stealthburner_leds: AddonPackageConfig = Field(default_factory=AddonPackageConfig)
+    timelapse: AddonPackageConfig = Field(default_factory=AddonPackageConfig)
+
+
+class ProjectConfigV2(BaseModel):
+    schema_version: int = 2
+    output_layout: Literal["source_tree", "modular"] = "source_tree"
     preset_id: str
     board: str
     dimensions: Dimensions
@@ -131,6 +178,12 @@ class ProjectConfig(BaseModel):
     toolhead: ToolheadConfig = Field(default_factory=ToolheadConfig)
     leds: LEDConfig = Field(default_factory=LEDConfig)
     advanced_overrides: dict[str, Any] = Field(default_factory=dict)
+    machine_attributes: MachineAttributes = Field(default_factory=MachineAttributes)
+    addon_configs: AddonConfigSet = Field(default_factory=AddonConfigSet)
+    section_map: dict[str, dict[str, dict[str, str]]] = Field(default_factory=dict)
+
+
+ProjectConfig = ProjectConfigV2
 
 
 class PresetSummary(BaseModel):
@@ -197,3 +250,5 @@ class ImportedMachineProfile(BaseModel):
     suggestions: list[ImportSuggestion] = Field(default_factory=list)
     include_graph: dict[str, list[str]] = Field(default_factory=dict)
     analysis_warnings: list[str] = Field(default_factory=list)
+    unmapped_sections: dict[str, list[str]] = Field(default_factory=dict)
+    parity_metadata: dict[str, Any] = Field(default_factory=dict)

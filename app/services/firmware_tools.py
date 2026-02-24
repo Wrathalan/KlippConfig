@@ -17,6 +17,10 @@ class FirmwareToolsService:
     )
     KEY_VALUE_COLON_PATTERN = re.compile(r"^([A-Za-z0-9_.-]+)\s*:\s*(.*)$")
     KEY_VALUE_EQUALS_PATTERN = re.compile(r"^([A-Za-z0-9_.-]+)\s*=\s*(.*)$")
+    NUMERIC_WITH_INLINE_COMMENT_PATTERN = re.compile(
+        r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(?:[#;].*)?$"
+    )
+    SECTION_KEY_IN_VALUE_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_.-]*):")
 
     _VALID_KINEMATICS = {
         "none",
@@ -47,6 +51,30 @@ class FirmwareToolsService:
         if self._is_glob_pattern(cleaned):
             return lowered.endswith(".cfg")
         return lowered.endswith(".cfg")
+
+    @classmethod
+    def _parse_numeric_value(cls, raw_value: str) -> float | None:
+        match = cls.NUMERIC_WITH_INLINE_COMMENT_PATTERN.match(raw_value or "")
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    @classmethod
+    def _has_suspicious_concatenated_key_value(cls, value: str) -> bool:
+        matches = list(cls.SECTION_KEY_IN_VALUE_PATTERN.finditer(value or ""))
+        if len(matches) < 2:
+            return False
+        for match in matches[1:]:
+            start = match.start()
+            if start <= 0:
+                continue
+            prev = value[start - 1]
+            if prev not in {" ", "\t", ",", "(", "[", "{", "\"", "'", "/"}:
+                return True
+        return False
 
     @staticmethod
     def _normalize_role(role: str | ConfigFileRole) -> ConfigFileRole:
@@ -293,6 +321,17 @@ class FirmwareToolsService:
                     field=f"line:{line_number}",
                 )
 
+            if self._has_suspicious_concatenated_key_value(value):
+                report.add(
+                    severity="warning",
+                    code="CFG_POSSIBLE_CONCATENATED_KEY_VALUE",
+                    message=(
+                        f"Value for '{key}' appears to contain a concatenated key/value fragment. "
+                        "Check for a missing newline in generated output."
+                    ),
+                    field=f"line:{line_number}",
+                )
+
             if section_key == "printer":
                 if key == "kinematics" and value and value.lower() not in self._VALID_KINEMATICS:
                     report.add(
@@ -308,9 +347,8 @@ class FirmwareToolsService:
                     "max_z_accel",
                     "square_corner_velocity",
                 }:
-                    try:
-                        numeric = float(value)
-                    except ValueError:
+                    numeric = self._parse_numeric_value(value)
+                    if numeric is None:
                         report.add(
                             severity="blocking",
                             code="CFG_NUMERIC_INVALID",
