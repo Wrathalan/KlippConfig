@@ -10,16 +10,8 @@
     "z": 120
   },
   "supported_boards": [
-    "btt_octopus_1_1",
-    "btt_octopus_pro_1_1",
-    "manta_m8p_v2",
-    "manta_m5p_v1_0",
-    "btt_kraken",
-    "fysetc_spider_v2",
-    "skr3_ez",
-    "duet3_mini_5plus",
-    "skr_pico",
-    "skr_mini_e3_v3"
+    "skr_mini_e3_v3",
+    "skr_pico"
   ],
   "defaults": {
     "max_velocity": 250,

@@ -11,11 +11,8 @@
   },
   "supported_boards": [
     "btt_octopus_1_1",
-    "btt_kraken",
-    "manta_m8p_v1_0",
-    "manta_m8p_v1_1",
+    "btt_octopus_pro_1_1",
     "manta_m8p_v2",
-    "fysetc_spider_v2",
     "btt_skr_1_3",
     "btt_skr_1_4"
   ],

@@ -1,6 +1,6 @@
 {
   "id": "btt_kraken",
-  "label": "BTT Kraken (Voron upstream)",
+  "label": "BTT Kraken (Community profile)",
   "mcu": "stm32h723xx",
   "serial_hint": "/dev/serial/by-id/{REPLACE WITH YOUR SERIAL}",
   "pins": {

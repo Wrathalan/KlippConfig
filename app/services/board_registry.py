@@ -376,7 +376,7 @@ BOARD_REGISTRY: dict[str, BoardProfile] = {
             "extruder_enable": "PD2",
             "heater_bed": "PC9",
             "heater_hotend": "PC8",
-            "temp_bed": "PA2",
+            "temp_bed": "PC4",
             "temp_hotend": "PA0",
             "probe": "PC14",
             "toolhead_fan": "PC7",

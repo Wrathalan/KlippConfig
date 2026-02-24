@@ -10,15 +10,6 @@
     "z": 230
   },
   "supported_boards": [
-    "btt_octopus_1_1",
-    "btt_octopus_pro_1_1",
-    "manta_m8p_v2",
-    "manta_m5p_v1_0",
-    "btt_kraken",
-    "fysetc_spider_v2",
-    "skr3_ez",
-    "duet3_mini_5plus",
-    "skr_pico",
     "skr_mini_e3_v3"
   ],
   "defaults": {
@@ -41,7 +32,7 @@
     "bltouch",
     "inductive"
   ],
-  "notes": "Switchwire profile for cartesian motion setups.",
+  "notes": "Switchwire profile for cartesian motion setups. Official docs target SKR Mini E3 V2.0 and Einsy Rambo; this preset currently maps to the closest available SKR Mini E3 V3 profile.",
   "supported_toolhead_boards": [
     "btt_ebb36_v1_2",
     "btt_ebb42_v1_2",
