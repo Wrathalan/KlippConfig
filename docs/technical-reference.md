@@ -144,7 +144,7 @@ Reference examples and format docs:
 3. Shows the creator icon from `assets\creator.ico`.
 4. Includes the Discord community link: https://discord.gg/4CthQzS7Qy
 
-## Testing and Manual Smoke
+## Testing
 
 - Run tests:
 
@@ -152,17 +152,4 @@ Reference examples and format docs:
 pytest
 ```
 
-- Manual release smoke checklist: `docs/manual-smoke-checklist.md`
 - Repeatable demo pack fixture: `tests/fixtures/demo_config_pack`
-
-## Windows Build
-
-```powershell
-& "$env:APPDATA\KlippConfig\private-sidecar\scripts\build_windows.ps1"
-```
-
-Build output:
-
-- `dist\KlippConfig.exe` (self-contained, no console window)
-- Desktop shortcut `KlippConfig.lnk` (created by the build script)
-- Optional installer in `dist\installer` when Inno Setup (`iscc`) is on `PATH`

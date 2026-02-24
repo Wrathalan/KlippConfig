@@ -1523,10 +1523,6 @@ QGroupBox::title {
         self.help_shortcuts_action.triggered.connect(self._show_keyboard_shortcuts)
         help_menu.addAction(self.help_shortcuts_action)
 
-        self.help_updates_action = QAction("Check for Updates", self)
-        self.help_updates_action.triggered.connect(self._check_for_updates)
-        help_menu.addAction(self.help_updates_action)
-
         self.help_about_action = QAction("About", self)
         self.help_about_action.triggered.connect(self._show_about_window)
         help_menu.addAction(self.help_about_action)
@@ -2002,16 +1998,6 @@ QGroupBox::title {
                 "Ctrl+Shift+U: Upload Current\n"
                 "Ctrl+Shift+R: Restart Klipper\n"
                 "Ctrl+Q: Exit"
-            ),
-        )
-
-    def _check_for_updates(self) -> None:
-        QMessageBox.information(
-            self,
-            "Check for Updates",
-            (
-                f"KlippConfig version: {__version__}\n\n"
-                "Automatic update checks are not configured in this build."
             ),
         )
 

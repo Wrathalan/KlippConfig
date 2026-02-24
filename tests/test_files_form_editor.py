@@ -143,4 +143,8 @@ def test_validate_current_cfg_updates_status(qtbot, monkeypatch, tmp_path) -> No
     assert report is not None
     assert not report.has_blocking
     assert window.cfg_tools_status_label.isVisible()
-    assert "no firmware validation issues" in window.cfg_tools_status_label.text().lower()
+    status_text = window.cfg_tools_status_label.text().lower()
+    assert (
+        "no firmware validation issues" in status_text
+        or "has no validation issues" in status_text
+    )

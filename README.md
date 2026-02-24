@@ -61,7 +61,6 @@ pythonw -m app.main
 ## Need More Detail?
 
 - Full technical reference and detailed workflows: `docs/technical-reference.md`
-- Manual release smoke checklist: `docs/manual-smoke-checklist.md`
 - Files UI experiment brief: `docs/files_ui_experiment_material_v1.md`
 - Bundle format and examples: `app/bundles/README.md`
 
