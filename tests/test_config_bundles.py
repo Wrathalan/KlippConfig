@@ -109,7 +109,7 @@ def test_invalid_bundle_files_are_ignored(tmp_path) -> None:
     assert service.load_addon_profiles() == {}
 
 
-def test_custom_addon_bundle_renders_using_bundle_template(monkeypatch, tmp_path) -> None:
+def test_custom_addon_bundle_is_ignored_when_addons_are_disabled(monkeypatch, tmp_path) -> None:
     bundle_root = tmp_path / "bundles"
     _write_json(
         bundle_root / "addons" / "chamber_heater.json",
@@ -149,10 +149,10 @@ def test_custom_addon_bundle_renders_using_bundle_template(monkeypatch, tmp_path
 
     report = validator.validate_project(project, preset)
     assert not report.has_blocking
+    assert any(f.code == "ADDONS_DISABLED" for f in report.findings)
 
     pack = renderer.render(project, preset)
-    assert "addons.cfg" in pack.files
-    assert "CHAMBER_HEATER_BUNDLE" in pack.files["addons.cfg"]
+    assert "addons.cfg" not in pack.files
 
 
 def test_usb_toolhead_bundle_renders_serial_and_skips_can_uuid_requirement(

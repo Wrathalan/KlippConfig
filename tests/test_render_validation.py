@@ -76,7 +76,7 @@ def test_each_preset_renders_required_files() -> None:
         assert required_files.issubset(set(pack.files.keys()))
 
 
-def test_toolhead_and_addons_render_expected_files() -> None:
+def test_toolhead_and_disabled_addons_render_expected_files() -> None:
     catalog = PresetCatalogService()
     renderer = ConfigRenderService()
     validator = ValidationService()
@@ -103,17 +103,18 @@ def test_toolhead_and_addons_render_expected_files() -> None:
 
     project_report = validator.validate_project(project, preset)
     assert not project_report.has_blocking
+    assert any(f.code == "ADDONS_DISABLED" for f in project_report.findings)
 
     pack = renderer.render(project, preset)
     assert "toolhead.cfg" in pack.files
     assert "toolhead_pins.cfg" in pack.files
-    assert "addons.cfg" in pack.files
+    assert "addons.cfg" not in pack.files
     assert "macros.cfg" in pack.files
 
     printer_cfg = pack.files["printer.cfg"]
     assert "[include toolhead.cfg]" in printer_cfg
     assert "[include toolhead_pins.cfg]" in printer_cfg
-    assert "[include addons.cfg]" in printer_cfg
+    assert "[include addons.cfg]" not in printer_cfg
     assert "[include macros.cfg]" in printer_cfg
 
 
@@ -155,7 +156,7 @@ def test_led_control_generates_leds_cfg_and_include() -> None:
     assert not rendered_report.has_blocking
 
 
-def test_multi_material_addon_conflict_blocks_validation() -> None:
+def test_addons_are_reported_as_disabled_warning() -> None:
     catalog = PresetCatalogService()
     validator = ValidationService()
     preset = catalog.load_preset("voron_2_4_350")
@@ -173,8 +174,8 @@ def test_multi_material_addon_conflict_blocks_validation() -> None:
         }
     )
     report = validator.validate_project(project, preset)
-    assert report.has_blocking
-    assert any(f.code == "MULTI_MATERIAL_ADDON_CONFLICT" for f in report.findings)
+    assert not report.has_blocking
+    assert any(f.code == "ADDONS_DISABLED" for f in report.findings)
 
 
 def test_qgl_requires_probe() -> None:

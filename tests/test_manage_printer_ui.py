@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QMainWindow, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 import app.ui.main_window as main_window_module
 from app.ui.main_window import MainWindow
@@ -186,27 +186,33 @@ def test_manage_control_url_resolution(qtbot) -> None:
     assert window._resolve_manage_control_url() == "http://printer.local/mainsail"
 
 
-def test_manage_open_control_window_uses_embedded_factory(qtbot, monkeypatch) -> None:
+def test_manage_open_control_window_loads_embedded_view(qtbot, monkeypatch) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
-    captured_urls: list[str] = []
-    fake_control_window = QMainWindow()
-    qtbot.addWidget(fake_control_window)
+    loaded_urls: list[str] = []
+    opened_urls: list[str] = []
 
-    def fake_create(url: str) -> QMainWindow:
-        captured_urls.append(url)
-        return fake_control_window
+    class FakeEmbeddedView:
+        def setUrl(self, url) -> None:  # noqa: ANN001
+            loaded_urls.append(url.toString())
 
-    monkeypatch.setattr(window, "_create_control_window", fake_create)
+    monkeypatch.setattr(window, "printers_embedded_control_view", FakeEmbeddedView())
+    monkeypatch.setattr(
+        main_window_module.QDesktopServices,
+        "openUrl",
+        lambda url: opened_urls.append(url.toString()) or True,
+    )
 
     window.manage_host_edit.setText("printer.local")
     window._manage_open_control_window()
 
-    assert captured_urls == ["http://printer.local"]
-    assert fake_control_window in window.manage_control_windows
+    assert loaded_urls == ["http://printer.local"]
+    assert opened_urls == []
+    assert window.tabs.currentWidget() is window.printers_tab
+    assert window.app_state_store.snapshot().ui.active_route == "printers"
 
 
 def test_manage_open_control_window_falls_back_to_browser(qtbot, monkeypatch) -> None:
@@ -217,14 +223,11 @@ def test_manage_open_control_window_falls_back_to_browser(qtbot, monkeypatch) ->
 
     opened_urls: list[str] = []
 
-    def fake_create(_url: str) -> QMainWindow:
-        raise RuntimeError("Embedded view unavailable")
-
     def fake_open_url(url) -> bool:
         opened_urls.append(url.toString())
         return True
 
-    monkeypatch.setattr(window, "_create_control_window", fake_create)
+    monkeypatch.setattr(window, "printers_embedded_control_view", None)
     monkeypatch.setattr(main_window_module.QDesktopServices, "openUrl", fake_open_url)
 
     window.manage_host_edit.setText("printer.local")

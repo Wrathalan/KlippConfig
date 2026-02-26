@@ -22,6 +22,10 @@ What it helps with:
 - Editing and validating existing `.cfg` files
 - Backups and restore workflows for live printers
 
+Current limitation:
+
+- Add-ons are temporarily disabled in the app while that workflow is being reworked.
+
 ## Dependencies (Unpackaged Run)
 
 Install these before running the app from source:
@@ -49,7 +53,7 @@ pythonw -m app.main
 3. In `Configuration`, select your preset and board.
 4. Click `Compile`.
 5. Open `Files` and review generated files and validation status.
-6. Go to `SSH`, connect to your printer.
+6. Open `Printer -> Connection Window...`, then connect to your printer.
 7. Use `Upload Current` when validation looks good.
 
 ## If You Already Have a Klipper Config

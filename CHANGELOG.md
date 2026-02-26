@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-02-26
+
+### Summary
+Major UX consolidation and workflow reliability release across navigation, printer control, and Files behavior.  
+Version `0.1.4` was intentionally skipped to release these grouped improvements as a single cut.
+
+### Highlights
+- Replaced the left sidebar workflow with a second top navigation bar and updated command/menu interaction styling.
+- Added dedicated `Printers` route behavior with embedded in-app webview flow and SSH setup fallback when no printer is configured.
+- Moved operational utilities into dedicated windows/menus (printer connection, discovery, active console) to reduce workflow clutter.
+- Removed unstable add-on workflow paths for now and cleaned related user-facing messaging.
+- Continued Files route modernization work, including experimental UI support and clearer status messaging patterns.
+
 ## [0.1.3] - 2026-02-22
 
 ### Summary

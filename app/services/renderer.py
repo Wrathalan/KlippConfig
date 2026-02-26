@@ -8,7 +8,6 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from app.domain.models import Preset, ProjectConfig, RenderedPack
 from app.services.board_registry import (
-    get_addon_profile,
     get_board_profile,
     get_toolhead_board_profile,
     toolhead_board_transport,
@@ -85,6 +84,8 @@ class ConfigRenderService:
         return value
 
     def _compose_context(self, project: ProjectConfig, preset: Preset) -> dict[str, Any]:
+        project_view = project.model_copy(deep=True)
+        project_view.addons = []
         board_profile = preset.board_profiles.get(project.board) or get_board_profile(project.board)
         toolhead_profile = (
             get_toolhead_board_profile(project.toolhead.board)
@@ -113,7 +114,7 @@ class ConfigRenderService:
             return self._coerce_override(project.advanced_overrides[name], default)
 
         return {
-            "project": project,
+            "project": project_view,
             "preset": preset,
             "board_profile": board_profile,
             "toolhead_profile": toolhead_profile,
@@ -138,11 +139,14 @@ class ConfigRenderService:
         return self._render_template(template_name, context)
 
     def _render_addon(self, addon_name: str, context: dict[str, Any]) -> str:
-        addon_profile = get_addon_profile(addon_name)
-        template_name = (
-            addon_profile.template if addon_profile else f"addons/{addon_name}.cfg.j2"
-        )
-        return self._render_template(template_name, context)
+        _ = addon_name
+        _ = context
+        return ""
+
+    @staticmethod
+    def _active_addons(_project: ProjectConfig) -> list[str]:
+        # Add-ons are currently disabled across the app and are intentionally ignored at render time.
+        return []
 
     @staticmethod
     def _render_section_map_file(sections: dict[str, dict[str, str]]) -> str:
@@ -173,6 +177,7 @@ class ConfigRenderService:
 
     def _render_modular(self, project: ProjectConfig, preset: Preset) -> RenderedPack:
         context = self._compose_context(project, preset)
+        active_addons = self._active_addons(project)
         files: OrderedDict[str, str] = OrderedDict()
         files["printer.cfg"] = self._render_template(preset.templates.printer, context)
         files["mcu.cfg"] = self._render_template(preset.templates.mcu, context)
@@ -186,9 +191,9 @@ class ConfigRenderService:
         if project.leds.enabled:
             files["leds.cfg"] = self._render_template("leds.cfg.j2", context)
 
-        if project.addons:
+        if active_addons:
             addon_sections: list[str] = [self._render_template("addons.cfg.j2", context).strip()]
-            for addon_name in sorted(project.addons):
+            for addon_name in sorted(active_addons):
                 addon_sections.append(self._render_addon(addon_name, context).strip())
             files["addons.cfg"] = "\n\n".join(addon_sections).strip() + "\n"
 
@@ -211,31 +216,21 @@ class ConfigRenderService:
                 "board": project.board,
                 "toolhead_board": project.toolhead.board,
                 "leds_enabled": project.leds.enabled,
-                "addons": list(project.addons),
+                "addons": list(active_addons),
                 "layout": "modular",
             },
         )
 
     def _render_source_tree(self, project: ProjectConfig, preset: Preset) -> RenderedPack:
         context = self._compose_context(project, preset)
+        active_addons = self._active_addons(project)
         section_map = project.section_map if isinstance(project.section_map, dict) else {}
         files: OrderedDict[str, str] = OrderedDict()
         if not section_map:
             modular = self._render_modular(project, preset)
-            for addon_name in sorted(project.addons):
-                addon_profile = get_addon_profile(addon_name)
-                if addon_profile is None or not addon_profile.package_templates:
-                    continue
-                printer_cfg = modular.files.get("printer.cfg", "")
-                for include_file in addon_profile.include_files:
-                    include_line = f"[include {include_file}]"
-                    if include_line not in printer_cfg:
-                        printer_cfg = printer_cfg.rstrip() + "\n" + include_line + "\n"
-                modular.files["printer.cfg"] = printer_cfg
-                for output_path, template_name in addon_profile.package_templates.items():
-                    modular.files[output_path] = self._render_template(template_name, context)
             modular.metadata["layout"] = "source_tree"
             modular.metadata["source_root_file"] = "printer.cfg"
+            modular.metadata["addons"] = list(active_addons)
             return modular
 
         include_graph = project.machine_attributes.include_graph
@@ -276,7 +271,7 @@ class ConfigRenderService:
                 "board": project.board,
                 "toolhead_board": project.toolhead.board,
                 "leds_enabled": project.leds.enabled,
-                "addons": list(project.addons),
+                "addons": list(active_addons),
                 "layout": "source_tree",
                 "source_root_file": root_file,
             },

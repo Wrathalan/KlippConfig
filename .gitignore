@@ -11,6 +11,8 @@ build/
 dist/
 *.zip
 *.log
+saved_connections.json
+**/saved_connections.json
 
 # Keep non-runtime/release assets private and out of this repo
 release/

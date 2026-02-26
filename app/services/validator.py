@@ -8,8 +8,6 @@ from jsonschema import Draft202012Validator
 
 from app.domain.models import Preset, ProjectConfig, RenderedPack, ValidationReport
 from app.services.board_registry import (
-    addon_supported_for_preset,
-    get_addon_profile,
     get_board_profile,
     get_toolhead_board_profile,
     toolhead_board_transport,
@@ -63,57 +61,15 @@ class ValidationService:
                     field="board",
                 )
 
-        unsupported_addons = [
-            addon
-            for addon in project.addons
-            if not addon_supported_for_preset(
-                addon,
-                preset_id=preset.id,
-                preset_family=preset.family,
-                preset_supported_addons=preset.supported_addons,
-            )
-        ]
-        if unsupported_addons:
-            report.add(
-                severity="blocking",
-                code="ADDON_UNSUPPORTED",
-                message=(
-                    f"Selected add-ons are not supported by preset '{preset.name}': "
-                    f"{', '.join(sorted(unsupported_addons))}."
-                ),
-                field="addons",
-            )
-
-        selected_multi: list[str] = []
-        for addon_id in project.addons:
-            addon_profile = get_addon_profile(addon_id)
-            if addon_profile and addon_profile.multi_material:
-                selected_multi.append(addon_id)
-        if len(selected_multi) > 1:
-            report.add(
-                severity="blocking",
-                code="MULTI_MATERIAL_ADDON_CONFLICT",
-                message=(
-                    "Only one multi-material add-on can be active at a time. "
-                    f"Selected: {', '.join(sorted(selected_multi))}."
-                ),
-                field="addons",
-            )
-
-        needs_toolhead = selected_multi
-        for addon_id in project.addons:
-            addon_profile = get_addon_profile(addon_id)
-            if addon_profile and addon_profile.recommends_toolhead and addon_id not in needs_toolhead:
-                needs_toolhead.append(addon_id)
-        if needs_toolhead and not project.toolhead.enabled:
+        if project.addons:
             report.add(
                 severity="warning",
-                code="ADDON_RECOMMENDS_TOOLHEAD",
+                code="ADDONS_DISABLED",
                 message=(
-                    "Selected add-ons usually require a toolhead board and dedicated IO. "
-                    "Enable toolhead board when your hardware uses dedicated toolhead electronics."
+                    "Add-ons are currently disabled in this build and will be ignored "
+                    "during validation and rendering."
                 ),
-                field="toolhead",
+                field="addons",
             )
 
         if project.toolhead.enabled:
@@ -345,14 +301,6 @@ class ValidationService:
                     severity="blocking",
                     code="TOOLHEAD_PINS_INCLUDE_MISSING",
                     message="'toolhead_pins.cfg' was generated but not included from 'printer.cfg'.",
-                    field="printer.cfg",
-                )
-
-            if "addons.cfg" in pack.files and "[include addons.cfg]" not in printer:
-                report.add(
-                    severity="blocking",
-                    code="ADDONS_INCLUDE_MISSING",
-                    message="'addons.cfg' was generated but not included from 'printer.cfg'.",
                     field="printer.cfg",
                 )
 

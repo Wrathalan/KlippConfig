@@ -30,7 +30,11 @@ def main() -> int:
     )
     ui_scaling.apply(app, resolved_mode)
 
-    window = MainWindow(ui_scaling_service=ui_scaling, active_scale_mode=resolved_mode)
+    window = MainWindow(
+        ui_scaling_service=ui_scaling,
+        active_scale_mode=resolved_mode,
+        auto_connect_on_launch=True,
+    )
     if icon_file.exists():
         window.setWindowIcon(app.windowIcon())
     window.show()

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+from queue import Empty, SimpleQueue
 from pathlib import Path
 import posixpath
 import re
+import threading
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +17,7 @@ from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -55,17 +58,13 @@ from app.domain.models import (
     ValidationReport,
 )
 from app.services.board_registry import (
-    addon_supported_for_preset,
-    get_addon_profile,
     get_board_profile,
     get_toolhead_board_profile,
-    list_addons,
     list_main_boards,
     list_toolhead_boards,
     refresh_bundle_catalog,
     toolhead_board_transport,
 )
-from app.services.addon_bundle_learning import AddonBundleLearningService
 from app.services.action_log import ActionLogService
 from app.services.exporter import ExportService
 from app.services.existing_machine_import import (
@@ -92,7 +91,7 @@ from app.services.validator import ValidationService
 from app.services.parity import ParityService
 from app.ui.app_state import AppStateStore
 from app.ui.design_tokens import build_base_stylesheet, build_files_material_stylesheet
-from app.ui.shell_scaffold import BottomStatusBar, LeftNav, RightContextPanel, RouteDefinition
+from app.ui.shell_scaffold import BottomStatusBar, LeftNav, RouteDefinition
 from app.version import __version__
 
 try:
@@ -170,6 +169,121 @@ class PrinterControlWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(normalized))
 
 
+class PrinterDiscoveryWindow(QMainWindow):
+    def __init__(self, suggested_cidrs: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Scan For Printers")
+        self.resize(980, 560)
+
+        root = QWidget(self)
+        layout = QVBoxLayout(root)
+        discovery_group = QGroupBox("Printer Discovery", root)
+        discovery_layout = QVBoxLayout(discovery_group)
+        discovery_form = QFormLayout()
+
+        self.scan_cidr_edit = QLineEdit(discovery_group)
+        self.scan_cidr_edit.setPlaceholderText("192.168.1.0/24")
+        self.scan_cidr_edit.setText(suggested_cidrs[0] if suggested_cidrs else "192.168.1.0/24")
+        discovery_form.addRow("IP range", self.scan_cidr_edit)
+
+        self.scan_timeout_spin = QDoubleSpinBox(discovery_group)
+        self.scan_timeout_spin.setRange(0.05, 3.0)
+        self.scan_timeout_spin.setDecimals(2)
+        self.scan_timeout_spin.setSingleStep(0.05)
+        self.scan_timeout_spin.setValue(0.35)
+        discovery_form.addRow("Timeout (s)", self.scan_timeout_spin)
+
+        self.scan_max_hosts_spin = QSpinBox(discovery_group)
+        self.scan_max_hosts_spin.setRange(1, 4096)
+        self.scan_max_hosts_spin.setValue(254)
+        discovery_form.addRow("Max hosts", self.scan_max_hosts_spin)
+        discovery_layout.addLayout(discovery_form)
+
+        discovery_hint = QLabel("Scan the network, then choose a host to use for SSH.", discovery_group)
+        discovery_hint.setWordWrap(True)
+        discovery_layout.addWidget(discovery_hint)
+
+        action_row = QHBoxLayout()
+        self.scan_network_btn = QPushButton("Scan Network", discovery_group)
+        action_row.addWidget(self.scan_network_btn)
+        self.use_selected_host_btn = QPushButton("Use Selected Host", discovery_group)
+        action_row.addWidget(self.use_selected_host_btn)
+        action_row.addStretch(1)
+        discovery_layout.addLayout(action_row)
+
+        self.discovery_results_table = QTableWidget(discovery_group)
+        self.discovery_results_table.setColumnCount(4)
+        self.discovery_results_table.setHorizontalHeaderLabels(
+            ["Host", "Moonraker", "SSH", "Details"]
+        )
+        self.discovery_results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.discovery_results_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.discovery_results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.discovery_results_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.discovery_results_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents
+        )
+        self.discovery_results_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.discovery_results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        discovery_layout.addWidget(self.discovery_results_table, 1)
+
+        layout.addWidget(discovery_group, 1)
+        self.setCentralWidget(root)
+
+
+class ActiveConsoleWindow(QMainWindow):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Active Console")
+        self.resize(1080, 640)
+
+        root = QWidget(self)
+        layout = QVBoxLayout(root)
+
+        controls = QHBoxLayout()
+        self.clear_btn = QPushButton("Clear", root)
+        controls.addWidget(self.clear_btn)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.console_tabs = QTabWidget(root)
+        layout.addWidget(self.console_tabs, 1)
+
+        self.active_log = QPlainTextEdit(root)
+        self.active_log.setReadOnly(True)
+        self.active_log.setMaximumBlockCount(4000)
+        self.console_tabs.addTab(self.active_log, "Active")
+
+        self.ssh_log = QPlainTextEdit(root)
+        self.ssh_log.setReadOnly(True)
+        self.ssh_log.setMaximumBlockCount(2000)
+        self.console_tabs.addTab(self.ssh_log, "SSH")
+
+        self.modify_log = QPlainTextEdit(root)
+        self.modify_log.setReadOnly(True)
+        self.modify_log.setMaximumBlockCount(2000)
+        self.console_tabs.addTab(self.modify_log, "Modify Existing")
+
+        self.manage_log = QPlainTextEdit(root)
+        self.manage_log.setReadOnly(True)
+        self.manage_log.setMaximumBlockCount(2000)
+        self.console_tabs.addTab(self.manage_log, "Manage Printer")
+
+        self.setCentralWidget(root)
+
+
+class PrinterConnectionWindow(QMainWindow):
+    def __init__(self, content: QWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Printer Connection")
+        self.resize(1080, 820)
+        self.setCentralWidget(content)
+
+
 class MainWindow(QMainWindow):
     MACRO_PACK_OPTIONS = {
         "core_maintenance": "Core Maintenance",
@@ -189,6 +303,10 @@ class MainWindow(QMainWindow):
         ("150", "150%"),
     )
     FILES_EXPERIMENT_SETTING_KEY = "ui/experiments/files_material_v1_enabled"
+    # Legacy keys kept only for cleanup migration from older app builds.
+    SSH_AUTO_CONNECT_ENABLED_SETTING_KEY = "ui/ssh/auto_connect_enabled"
+    SSH_DEFAULT_CONNECTION_SETTING_KEY = "ui/ssh/default_connection_name"
+    ADDON_IMPORT_FIELDS = {"addons", "addon_configs"}
     THEME_STYLESHEET_DARK = """
 QWidget {
     background-color: #1f1f1f;
@@ -212,6 +330,15 @@ QMenuBar, QMenu {
     background-color: #252525;
     color: #ececec;
 }
+QMenu {
+    min-width: 270px;
+}
+QMenu::item {
+    padding: 6px 40px 6px 10px;
+}
+QMenu::shortcut {
+    padding-right: 6px;
+}
 QMenu::item:selected {
     background-color: #3a3a3a;
 }
@@ -232,6 +359,7 @@ QGroupBox::title {
         active_scale_mode: UIScaleMode | None = None,
         saved_connection_service: SavedConnectionService | None = None,
         app_settings: QSettings | None = None,
+        auto_connect_on_launch: bool = False,
     ) -> None:
         super().__init__()
         self.setWindowTitle(f"KlippConfig v{__version__}")
@@ -244,14 +372,27 @@ QGroupBox::title {
         self.parity_service = ParityService()
         self.firmware_tools_service = FirmwareToolsService()
         self.existing_machine_import_service = ExistingMachineImportService()
-        self.addon_bundle_learning_service = AddonBundleLearningService()
         self.action_log_service = ActionLogService()
         self.app_state_store = AppStateStore()
         self.export_service = ExportService()
         self.project_store = ProjectStoreService()
         self.saved_connection_service = saved_connection_service or SavedConnectionService()
         self.saved_machine_profile_service = SavedMachineProfileService()
+        self._clear_legacy_ssh_prefs_from_app_settings()
         self.ssh_service: SSHDeployService | None = None
+        self.auto_connect_on_launch = bool(auto_connect_on_launch)
+        self.auto_connect_enabled = self.saved_connection_service.get_auto_connect_enabled(
+            default=True,
+        )
+        self.default_ssh_connection_name = (
+            self.saved_connection_service.get_default_connection_name()
+        )
+        self.auto_connect_attempted = False
+        self.auto_connect_in_progress = False
+        self.auto_connect_result_queue: SimpleQueue[dict[str, Any]] = SimpleQueue()
+        self.auto_connect_poll_timer = QTimer(self)
+        self.auto_connect_poll_timer.setInterval(80)
+        self.auto_connect_poll_timer.timeout.connect(self._process_auto_connect_result)
         self.discovery_service = PrinterDiscoveryService()
         self.ui_scaling_service = ui_scaling_service or UIScalingService()
         self.active_scale_mode: UIScaleMode = self.ui_scaling_service.resolve_mode(
@@ -262,11 +403,9 @@ QGroupBox::title {
         self.addon_options = self._build_addon_options()
         self.ui_routes = [
             RouteDefinition("home", "Home", active=True),
-            RouteDefinition("connect", "Connect", active=True),
             RouteDefinition("files", "Files", active=True),
-            RouteDefinition("edit_config", "Edit Config", active=True),
-            RouteDefinition("generate", "Generate", active=True),
-            RouteDefinition("deploy", "Deploy", active=True),
+            RouteDefinition("generate", "Build", active=True),
+            RouteDefinition("printers", "Printers", active=True),
             RouteDefinition("backups", "Backups", active=True),
         ]
 
@@ -295,7 +434,9 @@ QGroupBox::title {
         self._last_blocking_alert_snapshot: tuple[str, ...] = ()
         self._last_warning_toast_snapshot: tuple[int, int] = (0, 0)
         self.device_connected = False
-        self.manage_control_windows: list[QMainWindow] = []
+        self.active_console_window: ActiveConsoleWindow | None = None
+        self.printer_connection_window: PrinterConnectionWindow | None = None
+        self.printer_discovery_window: PrinterDiscoveryWindow | None = None
         self.preview_content = ""
         self.preview_source_label = ""
         self.preview_source_kind = "generated"
@@ -344,6 +485,97 @@ QGroupBox::title {
             return default
         return max(60, value)
 
+    def _clear_legacy_ssh_prefs_from_app_settings(self) -> None:
+        removed = False
+        for key in (
+            self.SSH_AUTO_CONNECT_ENABLED_SETTING_KEY,
+            self.SSH_DEFAULT_CONNECTION_SETTING_KEY,
+        ):
+            if self.app_settings.contains(key):
+                self.app_settings.remove(key)
+                removed = True
+        if removed:
+            self.app_settings.sync()
+
+    def _set_auto_connect_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        try:
+            self.saved_connection_service.set_auto_connect_enabled(target)
+        except OSError as exc:
+            self._append_ssh_log(f"Failed to persist auto-connect preference: {exc}")
+            self.statusBar().showMessage("Failed to save auto-connect preference", 2500)
+            target = self.saved_connection_service.get_auto_connect_enabled(default=True)
+        self.auto_connect_enabled = target
+        if hasattr(self, "ssh_auto_connect_checkbox"):
+            self.ssh_auto_connect_checkbox.blockSignals(True)
+            self.ssh_auto_connect_checkbox.setChecked(self.auto_connect_enabled)
+            self.ssh_auto_connect_checkbox.blockSignals(False)
+        self.statusBar().showMessage(
+            (
+                "Auto-connect on launch enabled."
+                if self.auto_connect_enabled
+                else "Auto-connect on launch disabled."
+            ),
+            2500,
+        )
+
+    def _persist_default_ssh_connection(self, profile_name: str) -> None:
+        target = profile_name.strip()
+        try:
+            self.saved_connection_service.set_default_connection_name(target)
+        except OSError as exc:
+            self._append_ssh_log(f"Failed to persist default connection: {exc}")
+            self.statusBar().showMessage("Failed to save default connection", 2500)
+            target = self.saved_connection_service.get_default_connection_name()
+        self.default_ssh_connection_name = target
+
+    def _update_default_connection_ui(self, available_names: list[str] | None = None) -> None:
+        if available_names is None:
+            try:
+                available_names = self.saved_connection_service.list_names()
+            except OSError:
+                available_names = []
+
+        default_name = self.default_ssh_connection_name.strip()
+        if default_name and default_name not in available_names:
+            default_name = ""
+            self._persist_default_ssh_connection("")
+
+        if hasattr(self, "ssh_default_connection_label"):
+            label = default_name if default_name else "(none)"
+            self.ssh_default_connection_label.setText(f"Default: {label}")
+        if hasattr(self, "ssh_set_default_btn"):
+            self.ssh_set_default_btn.setEnabled(bool(available_names))
+        if hasattr(self, "ssh_clear_default_btn"):
+            self.ssh_clear_default_btn.setEnabled(bool(default_name))
+
+    def _set_default_saved_connection_from_selection(self) -> None:
+        if not hasattr(self, "ssh_saved_connection_combo"):
+            return
+        profile_name = self.ssh_saved_connection_combo.currentText().strip()
+        if not profile_name:
+            self._show_error("Saved Connections", "No saved connection selected.")
+            return
+        if self.saved_connection_service.load(profile_name) is None:
+            self._show_error("Saved Connections", f"Connection '{profile_name}' was not found.")
+            self._refresh_saved_connection_profiles()
+            return
+        self._persist_default_ssh_connection(profile_name)
+        self._update_default_connection_ui()
+        self._refresh_tools_connect_menu()
+        self._append_ssh_log(f"Set default connection to '{profile_name}'.")
+        self.statusBar().showMessage(f"Default connection set: {profile_name}", 2500)
+
+    def _clear_default_saved_connection(self) -> None:
+        if not self.default_ssh_connection_name:
+            return
+        previous = self.default_ssh_connection_name
+        self._persist_default_ssh_connection("")
+        self._update_default_connection_ui()
+        self._refresh_tools_connect_menu()
+        self._append_ssh_log(f"Cleared default connection '{previous}'.")
+        self.statusBar().showMessage("Default connection cleared", 2500)
+
     def _is_files_experiment_enabled(self) -> bool:
         return bool(getattr(self, "files_experiment_enabled", False))
 
@@ -373,13 +605,8 @@ QGroupBox::title {
         )
 
     def _build_addon_options(self) -> dict[str, str]:
-        options: list[tuple[str, str]] = []
-        for addon_id in list_addons():
-            profile = get_addon_profile(addon_id)
-            label = profile.label if profile is not None else addon_id
-            options.append((addon_id, label))
-        options.sort(key=lambda item: item[1].lower())
-        return dict(options)
+        # Add-ons are intentionally disabled in the current app build.
+        return {}
 
     def _build_ui(self) -> None:
         self._build_menu()
@@ -387,24 +614,24 @@ QGroupBox::title {
 
         root = QWidget(self)
         root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
         self.toast_anchor = root
 
         self.tabs = QTabWidget(root)
+        self.route_nav_bar = self._build_route_nav_bar(root)
+        # Kept for compatibility with existing tests and route metadata checks.
         self.left_nav_scaffold = LeftNav(root)
         self.left_nav_scaffold.set_routes(self.ui_routes)
-        self.left_nav_scaffold.route_selected.connect(self._on_shell_route_selected)
-        self.right_context_panel = RightContextPanel(root)
+        self.left_nav_scaffold.hide()
         self.bottom_status_bar = BottomStatusBar(root)
         self.bottom_status_bar.setMinimumHeight(28)
 
-        shell_row = QHBoxLayout()
-        shell_row.setContentsMargins(0, 0, 0, 0)
-        shell_row.setSpacing(8)
-        shell_row.addWidget(self.left_nav_scaffold)
-        shell_row.addWidget(self.tabs, 1)
-        shell_row.addWidget(self.right_context_panel)
-        root_layout.addLayout(shell_row, 1)
+        root_layout.addWidget(self.route_nav_bar)
+        root_layout.addWidget(self.tabs, 1)
         root_layout.addWidget(self.bottom_status_bar)
+
+        self._ensure_active_console_window()
 
         self.main_tab = self._build_main_tab()
         self.wizard_tab = self._build_wizard_tab()
@@ -414,13 +641,15 @@ QGroupBox::title {
             else self._build_files_tab()
         )
         self.live_deploy_tab = self._build_live_deploy_tab()
+        self._ensure_printer_connection_window()
+        self.printers_tab = self._build_printers_tab()
         self.modify_existing_tab = self._build_modify_existing_tab()
         self.manage_printer_tab = self._build_manage_printer_tab()
 
         self.tabs.addTab(self.main_tab, "Main")
         self.tabs.addTab(self.wizard_tab, "Configuration")
         self.tabs.addTab(self.files_tab, "Files")
-        self.tabs.addTab(self.live_deploy_tab, "SSH")
+        self.tabs.addTab(self.printers_tab, "Printers")
         self.tabs.addTab(self.modify_existing_tab, "Modify Existing")
         self.tabs.addTab(self.manage_printer_tab, "Manage Printer")
         self.tabs.tabBar().setVisible(False)
@@ -437,6 +666,108 @@ QGroupBox::title {
         self.app_state_store.subscribe(self._on_app_state_changed)
         self._on_app_state_changed(self.app_state_store.snapshot())
         self.statusBar().showMessage("Ready")
+
+    def _build_route_nav_bar(self, parent: QWidget) -> QWidget:
+        bar = QWidget(parent)
+        bar.setObjectName("route_nav_bar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 5, 12, 5)
+        layout.setSpacing(8)
+        self.route_nav_buttons: dict[str, QToolButton] = {}
+        self.route_nav_button_group = QButtonGroup(self)
+        self.route_nav_button_group.setExclusive(True)
+
+        for route in self.ui_routes:
+            if not route.active:
+                continue
+            button = QToolButton(bar)
+            button.setObjectName("route_nav_button")
+            button.setText(route.label)
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.clicked.connect(
+                lambda _checked=False, route_key=route.key: self._on_shell_route_selected(route_key)
+            )
+            self.route_nav_button_group.addButton(button)
+            self.route_nav_buttons[route.key] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self._set_active_route_button("home")
+        return bar
+
+    def _set_active_route_button(self, route_key: str) -> None:
+        if not hasattr(self, "route_nav_buttons"):
+            return
+        normalized = (route_key or "").strip().lower()
+        if normalized == "edit_config":
+            normalized = "files"
+        elif normalized in {"deploy", "connect"}:
+            normalized = "printers"
+        if normalized not in self.route_nav_buttons:
+            return
+        for key, button in self.route_nav_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == normalized)
+            button.blockSignals(False)
+
+    def _ensure_active_console_window(self) -> ActiveConsoleWindow:
+        if self.active_console_window is not None:
+            return self.active_console_window
+
+        console_window = ActiveConsoleWindow(parent=self)
+        console_window.clear_btn.clicked.connect(self._clear_active_console_logs)
+        self.active_console_window = console_window
+        self.console_activity_log = console_window.active_log
+        self.ssh_log = console_window.ssh_log
+        self.modify_log = console_window.modify_log
+        self.manage_log = console_window.manage_log
+        return console_window
+
+    def _clear_active_console_logs(self) -> None:
+        if hasattr(self, "console_activity_log"):
+            self.console_activity_log.clear()
+        if hasattr(self, "ssh_log"):
+            self.ssh_log.clear()
+        if hasattr(self, "modify_log"):
+            self.modify_log.clear()
+        if hasattr(self, "manage_log"):
+            self.manage_log.clear()
+        self.statusBar().showMessage("Console cleared", 2000)
+
+    def _open_active_console_window(self) -> None:
+        console_window = self._ensure_active_console_window()
+        console_window.show()
+        console_window.raise_()
+        console_window.activateWindow()
+        self.statusBar().showMessage("Opened active console", 2500)
+
+    def _ensure_printer_connection_window(self) -> PrinterConnectionWindow:
+        if self.printer_connection_window is not None:
+            return self.printer_connection_window
+        connection_window = PrinterConnectionWindow(self.live_deploy_tab, parent=self)
+        self.printer_connection_window = connection_window
+        return connection_window
+
+    def _open_printer_connection_window(self, *, active_route: str = "deploy") -> None:
+        connection_window = self._ensure_printer_connection_window()
+        connection_window.show()
+        connection_window.raise_()
+        connection_window.activateWindow()
+        self.app_state_store.update_ui(active_route=active_route, right_panel_mode="context")
+        self.statusBar().showMessage("Opened printer connection window", 2500)
+
+    def _open_printers_webview_or_setup(self) -> None:
+        self.app_state_store.update_ui(active_route="printers", right_panel_mode="context")
+        if not self._has_ssh_target_configured():
+            self._open_printer_connection_window(active_route="printers")
+            self.statusBar().showMessage(
+                "Set SSH host and username to configure a printer first.",
+                3500,
+            )
+            return
+        self.tabs.setCurrentWidget(self.printers_tab)
+        self._manage_open_control_window()
+        self.app_state_store.update_ui(active_route="printers", right_panel_mode="context")
 
     def _init_toast_notification(self) -> None:
         self.toast_notification = QLabel("", self.toast_anchor)
@@ -531,6 +862,134 @@ QGroupBox::title {
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
         self._position_toast_notification()
+
+    def showEvent(self, event) -> None:  # noqa: ANN001
+        super().showEvent(event)
+        if not self.auto_connect_on_launch or self.auto_connect_attempted:
+            return
+        self.auto_connect_attempted = True
+        QTimer.singleShot(250, self._attempt_auto_connect_saved_profile)
+
+    def _attempt_auto_connect_saved_profile(self) -> None:
+        if self.device_connected or self.auto_connect_in_progress:
+            return
+        if not self.auto_connect_enabled:
+            self._append_ssh_log("Auto-connect skipped: disabled in SSH settings.")
+            return
+
+        try:
+            saved_profiles = self.saved_connection_service.list_names()
+        except OSError as exc:
+            self._append_ssh_log(f"Auto-connect skipped: failed to read saved connections ({exc}).")
+            return
+        if not saved_profiles:
+            return
+
+        default_name = self.default_ssh_connection_name.strip()
+        profile_name = ""
+        if len(saved_profiles) == 1:
+            profile_name = saved_profiles[0]
+        elif default_name and default_name in saved_profiles:
+            profile_name = default_name
+        else:
+            self._append_ssh_log(
+                "Auto-connect skipped: multiple saved connections found. Set a default connection."
+            )
+            self.statusBar().showMessage(
+                "Auto-connect skipped: set a default saved connection.",
+                4000,
+            )
+            return
+
+        if not self._load_saved_connection_profile(profile_name):
+            return
+
+        params = self._collect_ssh_params(show_errors=False)
+        if params is None:
+            self._append_ssh_log(
+                f"Auto-connect skipped for '{profile_name}': host/username or key path is invalid."
+            )
+            return
+
+        service = self._get_ssh_service(show_errors=False)
+        if service is None:
+            self._append_ssh_log("Auto-connect skipped: SSH service is unavailable.")
+            return
+
+        self.auto_connect_in_progress = True
+        self._update_action_enablement()
+        self.statusBar().showMessage(f"Auto-connecting to {params['host']}...", 0)
+        self._append_ssh_log(
+            f"Auto-connect: {params['username']}@{params['host']}:{params['port']} ({profile_name})"
+        )
+        self.action_log_service.log_event(
+            "connect",
+            phase="start",
+            host=str(params["host"]),
+            username=str(params["username"]),
+            port=int(params["port"]),
+            source="startup",
+            profile_name=profile_name,
+        )
+
+        def _run_connect() -> None:
+            try:
+                ok, output = service.test_connection(**params)
+                self.auto_connect_result_queue.put(
+                    {
+                        "ok": bool(ok),
+                        "output": str(output),
+                        "params": params,
+                        "profile_name": profile_name,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.auto_connect_result_queue.put(
+                    {
+                        "ok": False,
+                        "output": str(exc),
+                        "params": params,
+                        "profile_name": profile_name,
+                    }
+                )
+
+        threading.Thread(target=_run_connect, name="klippconfig-auto-connect", daemon=True).start()
+        self.auto_connect_poll_timer.start()
+
+    def _process_auto_connect_result(self) -> None:
+        if not self.auto_connect_in_progress:
+            self.auto_connect_poll_timer.stop()
+            return
+
+        try:
+            result = self.auto_connect_result_queue.get_nowait()
+        except Empty:
+            return
+
+        self.auto_connect_in_progress = False
+        self.auto_connect_poll_timer.stop()
+
+        params_raw = result.get("params")
+        params = params_raw if isinstance(params_raw, dict) else {}
+        host = str(params.get("host") or "").strip()
+        output = str(result.get("output") or "").strip() or "No response."
+        ok = bool(result.get("ok"))
+
+        if ok:
+            self._apply_connect_success(params, output, source="startup")
+            return
+
+        self._apply_connect_failure(
+            params,
+            output,
+            source="startup",
+            show_error_dialog=False,
+            use_failure_prefix=False,
+        )
+        if host:
+            self.statusBar().showMessage(f"Auto-connect failed for {host}", 4000)
+        else:
+            self.statusBar().showMessage("Auto-connect failed", 4000)
 
     def _build_persistent_preview_panel(self, parent: QWidget) -> QWidget:
         panel = QWidget(parent)
@@ -674,19 +1133,18 @@ QGroupBox::title {
         route = "home"
         if current is self.main_tab:
             route = "home"
-        elif current is self.live_deploy_tab:
-            route = "connect"
         elif current is self.files_tab:
             route = "files"
         elif current is self.modify_existing_tab:
             route = "edit_config"
         elif current is self.wizard_tab:
             route = "generate"
+        elif current is self.printers_tab:
+            route = "printers"
         elif current is self.manage_printer_tab:
             route = "backups"
         self.app_state_store.update_ui(active_route=route)
-        if hasattr(self, "left_nav_scaffold"):
-            self.left_nav_scaffold.select_route(route)
+        self._set_active_route_button(route)
 
     def _on_shell_route_selected(self, route_key: str) -> None:
         route = (route_key or "").strip().lower()
@@ -700,8 +1158,7 @@ QGroupBox::title {
             )
             return
         if route == "connect":
-            self.tabs.setCurrentWidget(self.live_deploy_tab)
-            self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
+            self._open_printer_connection_window(active_route="printers")
             return
         if route == "files":
             self.tabs.setCurrentWidget(self.files_tab)
@@ -718,10 +1175,10 @@ QGroupBox::title {
             self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
             return
         if route == "deploy":
-            self.tabs.setCurrentWidget(self.live_deploy_tab)
-            if hasattr(self, "ssh_log_section_toggle"):
-                self.ssh_log_section_toggle.setChecked(True)
-            self.app_state_store.update_ui(active_route=route, right_panel_mode="logs")
+            self._open_printer_connection_window(active_route="printers")
+            return
+        if route == "printers":
+            self._open_printers_webview_or_setup()
             return
         if route == "backups":
             self.tabs.setCurrentWidget(self.manage_printer_tab)
@@ -729,14 +1186,14 @@ QGroupBox::title {
             return
 
     def _on_app_state_changed(self, state) -> None:  # noqa: ANN001
-        if not hasattr(self, "right_context_panel"):
-            return
         ui = state.ui
         if hasattr(self, "view_toggle_sidebar_action"):
             self.view_toggle_sidebar_action.blockSignals(True)
             self.view_toggle_sidebar_action.setChecked(bool(ui.left_nav_visible))
             self.view_toggle_sidebar_action.blockSignals(False)
-        self.left_nav_scaffold.setVisible(bool(ui.left_nav_visible))
+        if hasattr(self, "route_nav_bar"):
+            self.route_nav_bar.setVisible(bool(ui.left_nav_visible))
+        self._set_active_route_button(ui.active_route or "home")
         if hasattr(self, "view_right_panel_context_action"):
             self.view_right_panel_context_action.setChecked(ui.right_panel_mode == "context")
         if hasattr(self, "view_right_panel_validation_action"):
@@ -748,67 +1205,68 @@ QGroupBox::title {
             self.view_files_experiment_action.setChecked(ui.files_ui_variant == "material_v1")
             self.view_files_experiment_action.blockSignals(False)
 
-        mode = (ui.right_panel_mode or "context").strip().lower()
-        if mode == "validation":
-            panel_lines = [
-                "Validation",
-                "",
-                f"Blocking: {state.validation.blocking}",
-                f"Warnings: {state.validation.warnings}",
-                f"Source: {state.validation.source_label or 'n/a'}",
-                "",
-                "Tip: Use Configuration -> Validate Current for full diagnostics.",
-            ]
-        elif mode == "logs":
-            recent_logs: list[str] = []
-            if hasattr(self, "ssh_log"):
-                ssh_lines = self.ssh_log.toPlainText().splitlines()
-                if ssh_lines:
-                    recent_logs.extend(ssh_lines[-8:])
-            if hasattr(self, "modify_log"):
-                modify_lines = self.modify_log.toPlainText().splitlines()
-                if modify_lines:
-                    recent_logs.extend(modify_lines[-6:])
-            if not recent_logs:
-                recent_logs = ["(no console log entries yet)"]
-            panel_lines = ["Logs", ""] + recent_logs[-14:]
-        else:
-            panel_lines = ["Context", "", f"Route: {ui.active_route or 'home'}"]
-            if ui.active_route == "generate" and self.current_project is not None:
-                project = self.current_project
-                panel_lines.extend(
-                    [
-                        "",
-                        "Machine Summary",
-                        f"Preset: {project.preset_id}",
-                        f"Board: {project.board}",
-                        (
-                            f"Build volume: {project.dimensions.x} x {project.dimensions.y} x "
-                            f"{project.dimensions.z}"
-                        ),
-                        f"Probe: {project.probe.type or 'None'}",
-                        f"Toolhead: {project.toolhead.board or 'None'}",
-                        f"Add-ons: {', '.join(project.addons) if project.addons else 'None'}",
-                    ]
-                )
+        if hasattr(self, "right_context_panel"):
+            mode = (ui.right_panel_mode or "context").strip().lower()
+            if mode == "validation":
+                panel_lines = [
+                    "Validation",
+                    "",
+                    f"Blocking: {state.validation.blocking}",
+                    f"Warnings: {state.validation.warnings}",
+                    f"Source: {state.validation.source_label or 'n/a'}",
+                    "",
+                    "Tip: Use Configuration -> Validate Current for full diagnostics.",
+                ]
+            elif mode == "logs":
+                recent_logs: list[str] = []
+                if hasattr(self, "ssh_log"):
+                    ssh_lines = self.ssh_log.toPlainText().splitlines()
+                    if ssh_lines:
+                        recent_logs.extend(ssh_lines[-8:])
+                if hasattr(self, "modify_log"):
+                    modify_lines = self.modify_log.toPlainText().splitlines()
+                    if modify_lines:
+                        recent_logs.extend(modify_lines[-6:])
+                if not recent_logs:
+                    recent_logs = ["(no console log entries yet)"]
+                panel_lines = ["Logs", ""] + recent_logs[-14:]
             else:
-                panel_lines.extend(
-                    [
-                        "",
-                        f"Connected: {'yes' if state.connection.connected else 'no'}",
-                        f"Host: {state.connection.host or 'n/a'}",
-                        f"Printer: {state.connection.target_printer or 'n/a'}",
-                        "",
-                        f"Active file: {state.active_file.path or 'none'}",
-                        f"Source: {state.active_file.source or 'n/a'}",
-                        f"Dirty: {'yes' if state.active_file.dirty else 'no'}",
-                        "",
-                        f"Upload: {'busy' if state.deploy.upload_in_progress else 'idle'}",
-                        f"Upload status: {state.deploy.last_upload_status or 'n/a'}",
-                        f"Restart status: {state.deploy.last_restart_status or 'n/a'}",
-                    ]
-                )
-        self.right_context_panel.content.setPlainText("\n".join(panel_lines))
+                panel_lines = ["Context", "", f"Route: {ui.active_route or 'home'}"]
+                if ui.active_route == "generate" and self.current_project is not None:
+                    project = self.current_project
+                    panel_lines.extend(
+                        [
+                            "",
+                            "Machine Summary",
+                            f"Preset: {project.preset_id}",
+                            f"Board: {project.board}",
+                            (
+                                f"Build volume: {project.dimensions.x} x {project.dimensions.y} x "
+                                f"{project.dimensions.z}"
+                            ),
+                            f"Probe: {project.probe.type or 'None'}",
+                            f"Toolhead: {project.toolhead.board or 'None'}",
+                            "Add-ons: disabled",
+                        ]
+                    )
+                else:
+                    panel_lines.extend(
+                        [
+                            "",
+                            f"Connected: {'yes' if state.connection.connected else 'no'}",
+                            f"Host: {state.connection.host or 'n/a'}",
+                            f"Printer: {state.connection.target_printer or 'n/a'}",
+                            "",
+                            f"Active file: {state.active_file.path or 'none'}",
+                            f"Source: {state.active_file.source or 'n/a'}",
+                            f"Dirty: {'yes' if state.active_file.dirty else 'no'}",
+                            "",
+                            f"Upload: {'busy' if state.deploy.upload_in_progress else 'idle'}",
+                            f"Upload status: {state.deploy.last_upload_status or 'n/a'}",
+                            f"Restart status: {state.deploy.last_restart_status or 'n/a'}",
+                        ]
+                    )
+            self.right_context_panel.content.setPlainText("\n".join(panel_lines))
         self.bottom_status_bar.set_connection(
             state.connection.connected,
             state.connection.target_printer or state.connection.host,
@@ -1305,17 +1763,11 @@ QGroupBox::title {
         file_menu.addAction(exit_action)
 
         view_menu = menu_bar.addMenu("View")
-        self.view_toggle_sidebar_action = QAction("Toggle Sidebar", self)
+        self.view_toggle_sidebar_action = QAction("Toggle Navigation Bar", self)
         self.view_toggle_sidebar_action.setCheckable(True)
         self.view_toggle_sidebar_action.setChecked(True)
         self.view_toggle_sidebar_action.toggled.connect(self._set_sidebar_visible)
         view_menu.addAction(self.view_toggle_sidebar_action)
-
-        self.view_toggle_console_action = QAction("Toggle Console", self)
-        self.view_toggle_console_action.setCheckable(True)
-        self.view_toggle_console_action.setChecked(False)
-        self.view_toggle_console_action.toggled.connect(self._set_console_visible)
-        view_menu.addAction(self.view_toggle_console_action)
 
         self.view_toggle_raw_form_action = QAction("Show Raw / Form Mode", self)
         self.view_toggle_raw_form_action.triggered.connect(self._toggle_raw_form_mode)
@@ -1351,39 +1803,11 @@ QGroupBox::title {
         self.view_reset_layout_action.triggered.connect(self._reset_layout)
         view_menu.addAction(self.view_reset_layout_action)
 
-        self.view_right_panel_menu = view_menu.addMenu("Right Panel")
-        self.view_right_panel_group = QActionGroup(self)
-        self.view_right_panel_group.setExclusive(True)
-        self.view_right_panel_context_action = QAction("Context", self)
-        self.view_right_panel_context_action.setCheckable(True)
-        self.view_right_panel_context_action.setChecked(True)
-        self.view_right_panel_context_action.setActionGroup(self.view_right_panel_group)
-        self.view_right_panel_context_action.triggered.connect(
-            lambda checked=False: self.app_state_store.update_ui(right_panel_mode="context")
-        )
-        self.view_right_panel_menu.addAction(self.view_right_panel_context_action)
-
-        self.view_right_panel_validation_action = QAction("Validation", self)
-        self.view_right_panel_validation_action.setCheckable(True)
-        self.view_right_panel_validation_action.setActionGroup(self.view_right_panel_group)
-        self.view_right_panel_validation_action.triggered.connect(
-            lambda checked=False: self.app_state_store.update_ui(right_panel_mode="validation")
-        )
-        self.view_right_panel_menu.addAction(self.view_right_panel_validation_action)
-
-        self.view_right_panel_logs_action = QAction("Logs", self)
-        self.view_right_panel_logs_action.setCheckable(True)
-        self.view_right_panel_logs_action.setActionGroup(self.view_right_panel_group)
-        self.view_right_panel_logs_action.triggered.connect(
-            lambda checked=False: self.app_state_store.update_ui(right_panel_mode="logs")
-        )
-        self.view_right_panel_menu.addAction(self.view_right_panel_logs_action)
-
         view_menu.addSeparator()
         self._build_ui_scale_menu(view_menu, title="Zoom")
 
         printer_menu = menu_bar.addMenu("Printer")
-        self.printer_connect_action = QAction("Connect...", self)
+        self.printer_connect_action = QAction("Connection Window...", self)
         self.printer_connect_action.setShortcut("Ctrl+Shift+C")
         self.printer_connect_action.triggered.connect(self._connect_ssh_from_command_bar)
         printer_menu.addAction(self.printer_connect_action)
@@ -1394,14 +1818,6 @@ QGroupBox::title {
         self.printer_disconnect_action = QAction("Disconnect", self)
         self.printer_disconnect_action.triggered.connect(self._disconnect_printer)
         printer_menu.addAction(self.printer_disconnect_action)
-
-        self.tools_scan_printers_action = QAction("Scan Network", self)
-        self.tools_scan_printers_action.triggered.connect(self._scan_for_printers)
-        printer_menu.addAction(self.tools_scan_printers_action)
-
-        self.tools_use_selected_host_action = QAction("Use Selected Host", self)
-        self.tools_use_selected_host_action.triggered.connect(self._use_selected_discovery_host)
-        printer_menu.addAction(self.tools_use_selected_host_action)
 
         self.printer_manage_saved_action = QAction("Manage Saved Connections", self)
         self.printer_manage_saved_action.triggered.connect(self._open_saved_connections_manager)
@@ -1424,10 +1840,6 @@ QGroupBox::title {
         self.printer_restart_host_action = QAction("Restart Host", self)
         self.printer_restart_host_action.triggered.connect(self._restart_host_service)
         printer_menu.addAction(self.printer_restart_host_action)
-
-        self.printer_view_console_action = QAction("View Console Log", self)
-        self.printer_view_console_action.triggered.connect(self._view_printer_console_log)
-        printer_menu.addAction(self.printer_view_console_action)
 
         configuration_menu = menu_bar.addMenu("Configuration")
         self.tools_open_remote_action = QAction("Open Remote Config", self)
@@ -1456,10 +1868,6 @@ QGroupBox::title {
         self.configuration_compile_action.triggered.connect(self._render_and_validate)
         configuration_menu.addAction(self.configuration_compile_action)
 
-        self.configuration_manage_addons_action = QAction("Manage Add-ons", self)
-        self.configuration_manage_addons_action.triggered.connect(self._open_manage_addons)
-        configuration_menu.addAction(self.configuration_manage_addons_action)
-
         self.configuration_section_overrides_action = QAction("Section Overrides", self)
         self.configuration_section_overrides_action.triggered.connect(
             self._open_section_overrides
@@ -1467,9 +1875,14 @@ QGroupBox::title {
         configuration_menu.addAction(self.configuration_section_overrides_action)
 
         tools_menu = menu_bar.addMenu("Tools")
-        self.tools_printer_discovery_action = QAction("Printer Discovery", self)
+        self.tools_printer_discovery_action = QAction("Scan For Printers...", self)
         self.tools_printer_discovery_action.triggered.connect(self._open_printer_discovery)
         tools_menu.addAction(self.tools_printer_discovery_action)
+        self.tools_scan_printers_action = self.tools_printer_discovery_action
+
+        self.tools_active_console_action = QAction("Active Console", self)
+        self.tools_active_console_action.triggered.connect(self._open_active_console_window)
+        tools_menu.addAction(self.tools_active_console_action)
 
         self.tools_explore_config_action = QAction("Explore Config Directory", self)
         self.tools_explore_config_action.triggered.connect(
@@ -1497,10 +1910,6 @@ QGroupBox::title {
             self._open_guided_component_setup
         )
         self.tools_advanced_settings_menu.addAction(self.tools_guided_component_setup_action)
-
-        self.tools_learn_addons_action = QAction("Learn Add-ons from Imported Config", self)
-        self.tools_learn_addons_action.triggered.connect(self._learn_addons_from_import)
-        self.tools_advanced_settings_menu.addAction(self.tools_learn_addons_action)
 
         self.tools_deploy_action = QAction("Deploy Generated Pack", self)
         self.tools_deploy_action.triggered.connect(self._deploy_generated_pack)
@@ -1636,33 +2045,23 @@ QGroupBox::title {
 
     def _set_sidebar_visible(self, visible: bool) -> None:
         self.app_state_store.update_ui(left_nav_visible=visible)
-        if hasattr(self, "left_nav_scaffold"):
-            self.left_nav_scaffold.setVisible(visible)
-        if hasattr(self, "generated_file_list"):
-            self.generated_file_list.setVisible(visible)
-        if hasattr(self, "wizard_package_list_group"):
-            self.wizard_package_list_group.setVisible(visible)
-
-        if hasattr(self, "files_splitter"):
-            self.files_splitter.setSizes([1, 3] if visible else [0, 4])
-        if hasattr(self, "wizard_package_splitter"):
-            self.wizard_package_splitter.setSizes([1, 3] if visible else [0, 4])
+        if hasattr(self, "route_nav_bar"):
+            self.route_nav_bar.setVisible(visible)
 
         self.statusBar().showMessage(
-            "Sidebar shown" if visible else "Sidebar hidden",
+            "Navigation bar shown" if visible else "Navigation bar hidden",
             2000,
         )
 
     def _set_console_visible(self, visible: bool) -> None:
         self.app_state_store.update_ui(right_panel_mode="logs" if visible else "context")
-        for toggle_name in (
-            "ssh_log_section_toggle",
-            "manage_log_section_toggle",
-            "modify_log_section_toggle",
-        ):
-            toggle = getattr(self, toggle_name, None)
-            if isinstance(toggle, QToolButton):
-                toggle.setChecked(visible)
+        console_window = self._ensure_active_console_window()
+        if visible:
+            console_window.show()
+            console_window.raise_()
+            console_window.activateWindow()
+        else:
+            console_window.hide()
         self.statusBar().showMessage(
             "Console shown" if visible else "Console hidden",
             2000,
@@ -1679,8 +2078,7 @@ QGroupBox::title {
         self.statusBar().showMessage("Advanced mode hidden", 2000)
 
     def _connect_ssh_from_command_bar(self) -> None:
-        self._on_shell_route_selected("connect")
-        self._connect_ssh_to_host()
+        self._open_printer_connection_window()
 
     def _active_route(self) -> str:
         snapshot = self.app_state_store.snapshot()
@@ -1800,10 +2198,7 @@ QGroupBox::title {
         else:
             self._set_sidebar_visible(True)
 
-        if hasattr(self, "view_toggle_console_action"):
-            self.view_toggle_console_action.setChecked(False)
-        else:
-            self._set_console_visible(False)
+        self._set_console_visible(False)
 
         if hasattr(self, "file_view_tabs"):
             self.file_view_tabs.setCurrentIndex(0)
@@ -1814,11 +2209,14 @@ QGroupBox::title {
         self.statusBar().showMessage("Layout reset", 2500)
 
     def _open_manage_addons(self) -> None:
-        self.tabs.setCurrentWidget(self.wizard_tab)
-        self.app_state_store.update_ui(active_route="generate", right_panel_mode="context")
-        if hasattr(self, "addons_section_toggle"):
-            self.addons_section_toggle.setChecked(True)
-        self.statusBar().showMessage("Focused add-on management", 2500)
+        QMessageBox.information(
+            self,
+            "Add-ons Disabled",
+            (
+                "Add-on support is temporarily disabled in this build because it is unreliable.\n"
+                "It will return in a future release after targeted rework."
+            ),
+        )
 
     def _open_section_overrides(self) -> None:
         self.tabs.setCurrentWidget(self.files_tab)
@@ -1828,8 +2226,10 @@ QGroupBox::title {
         self.statusBar().showMessage("Opened section overrides", 2500)
 
     def _open_printer_discovery(self) -> None:
-        self.tabs.setCurrentWidget(self.live_deploy_tab)
-        self.app_state_store.update_ui(active_route="connect", right_panel_mode="context")
+        discovery_window = self._ensure_printer_discovery_window()
+        discovery_window.show()
+        discovery_window.raise_()
+        discovery_window.activateWindow()
         self._scan_for_printers()
 
     def _open_backup_manager(self) -> None:
@@ -1859,9 +2259,9 @@ QGroupBox::title {
         )
 
     def _open_saved_connections_manager(self) -> None:
-        self.tabs.setCurrentWidget(self.live_deploy_tab)
+        self._open_printer_connection_window()
         self._refresh_saved_connection_profiles()
-        self.statusBar().showMessage("Manage saved connections in SSH tab", 2500)
+        self.statusBar().showMessage("Manage saved connections in Printer Connection window", 2500)
 
     def _disconnect_printer(self) -> None:
         self._set_device_connection_health(False, "Disconnected from printer.")
@@ -1959,12 +2359,7 @@ QGroupBox::title {
         )
 
     def _view_printer_console_log(self) -> None:
-        self.tabs.setCurrentWidget(self.live_deploy_tab)
-        self.app_state_store.update_ui(active_route="deploy", right_panel_mode="logs")
-        self.ssh_log_section_toggle.setChecked(True)
-        if hasattr(self, "view_toggle_console_action"):
-            self.view_toggle_console_action.setChecked(True)
-        self.statusBar().showMessage("Opened printer console log", 2500)
+        self._open_active_console_window()
 
     def _open_documentation(self) -> None:
         readme = Path(__file__).resolve().parents[2] / "README.md"
@@ -2008,7 +2403,7 @@ QGroupBox::title {
         self.tabs.setCurrentWidget(self.modify_existing_tab)
 
     def _go_to_ssh_tab(self) -> None:
-        self.tabs.setCurrentWidget(self.live_deploy_tab)
+        self._open_printer_connection_window()
 
     def _guided_prompt_text(
         self,
@@ -2264,7 +2659,6 @@ QGroupBox::title {
             [
                 "Mainboard Bundle",
                 "Toolhead PCB Bundle",
-                "Add-on Bundle",
                 "Macro Template Scaffold",
             ],
             default_index=0,
@@ -2279,7 +2673,6 @@ QGroupBox::title {
         builders: dict[str, Any] = {
             "Mainboard Bundle": self._collect_mainboard_bundle_spec,
             "Toolhead PCB Bundle": self._collect_toolhead_bundle_spec,
-            "Add-on Bundle": self._collect_addon_bundle_spec,
             "Macro Template Scaffold": self._collect_macro_template_spec,
         }
         builder = builders.get(component_type)
@@ -2295,13 +2688,15 @@ QGroupBox::title {
         component_type = str(spec.get("component_type") or "")
         component_id = str(spec.get("id") or "").strip()
 
-        if component_type in {"mainboard", "toolhead_board", "addon"}:
+        if component_type == "addon":
+            raise ValueError("Add-on bundle creation is disabled in this build.")
+
+        if component_type in {"mainboard", "toolhead_board"}:
             if not component_id:
                 raise ValueError("Component ID is required.")
             subdir = {
                 "mainboard": "boards",
                 "toolhead_board": "toolhead_boards",
-                "addon": "addons",
             }[component_type]
             payload = spec.get("payload")
             if not isinstance(payload, dict):
@@ -2343,11 +2738,6 @@ QGroupBox::title {
 
     def _refresh_bundle_backed_component_options(self) -> None:
         refresh_bundle_catalog()
-        self.addon_options = self._build_addon_options()
-        for addon_id in self.addon_options:
-            if addon_id not in self.addon_checkboxes:
-                self._add_addon_checkbox(addon_id)
-
         if self.current_preset is None:
             return
         available_boards = sorted(set(self.current_preset.supported_boards).union(list_main_boards()))
@@ -2356,7 +2746,6 @@ QGroupBox::title {
         )
         self._populate_board_combo(available_boards)
         self._populate_toolhead_board_combos(available_toolheads)
-        self._apply_addon_support(self.current_preset)
         self._refresh_board_summary()
         self._render_and_validate()
 
@@ -2382,47 +2771,20 @@ QGroupBox::title {
             (
                 "Created bundle files:\n"
                 f"{created_lines}\n\n"
-                "Reloaded bundle catalog. New boards/add-ons are available immediately."
+                "Reloaded bundle catalog. New boards/toolhead boards are available immediately."
             ),
         )
         self.statusBar().showMessage("Guided component setup created bundle files", 3000)
 
     def _learn_addons_from_import(self) -> None:
-        if self.current_import_profile is None or not self.imported_file_map:
-            self._show_error(
-                "Learn Add-ons",
-                "Import an existing machine first, then run add-on learning.",
-            )
-            return
-        try:
-            created_paths = self.addon_bundle_learning_service.learn_from_import(
-                self.current_import_profile,
-                self.imported_file_map,
-            )
-        except OSError as exc:
-            self._show_error("Learn Add-ons", str(exc))
-            return
-
-        if not created_paths:
-            QMessageBox.information(
-                self,
-                "Learn Add-ons",
-                "No supported add-on files were detected in the imported config.",
-            )
-            return
-
-        self._refresh_bundle_backed_component_options()
-        created_lines = "\n".join(str(path) for path in created_paths)
         QMessageBox.information(
             self,
-            "Learn Add-ons",
+            "Add-ons Disabled",
             (
-                "Learned add-on bundle files:\n"
-                f"{created_lines}\n\n"
-                "Reloaded bundle catalog. Learned add-ons are now available."
+                "Add-on support is temporarily disabled in this build because it is unreliable.\n"
+                "Learning and bundle generation for add-ons are disabled for now."
             ),
         )
-        self.statusBar().showMessage("Learned add-on bundles from imported config", 3000)
 
     def _show_about_window(self) -> None:
         self._ensure_about_window()
@@ -2556,6 +2918,11 @@ QGroupBox::title {
 
     def _populate_import_review(self, profile: ImportedMachineProfile) -> None:
         self.import_review_suggestions = list(profile.suggestions)
+        self.import_review_suggestions = [
+            suggestion
+            for suggestion in self.import_review_suggestions
+            if suggestion.field not in self.ADDON_IMPORT_FIELDS
+        ]
         self.import_review_table.setRowCount(len(self.import_review_suggestions))
 
         for row, suggestion in enumerate(self.import_review_suggestions):
@@ -2580,7 +2947,7 @@ QGroupBox::title {
             self.import_review_table.setItem(row, 5, QTableWidgetItem(suggestion.source_file))
 
         warning_count = len(profile.analysis_warnings)
-        suggestion_count = len(profile.suggestions)
+        suggestion_count = len(self.import_review_suggestions)
         unmapped_count = sum(len(items) for items in profile.unmapped_sections.values())
         if warning_count > 0:
             preview_warning = profile.analysis_warnings[0]
@@ -2798,62 +3165,102 @@ QGroupBox::title {
     def _build_main_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
 
         title = QLabel("KlippConfig Main", tab)
-        title.setStyleSheet("QLabel { font-size: 22px; font-weight: 700; }")
+        title.setStyleSheet("QLabel { font-size: 24px; font-weight: 700; }")
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Choose your workflow entry point. Existing SSH, Manage Printer, and Files tools remain available.",
+            "Choose a workflow to get started.",
             tab,
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         actions_group = QGroupBox("Start", tab)
-        actions_layout = QVBoxLayout(actions_group)
-        actions_layout.setSpacing(10)
+        actions_layout = QGridLayout(actions_group)
+        actions_layout.setHorizontalSpacing(16)
+        actions_layout.setVerticalSpacing(16)
+
+        button_style = (
+            "QPushButton {"
+            " min-height: 110px;"
+            " font-size: 17px;"
+            " font-weight: 700;"
+            " text-align: left;"
+            " padding: 14px;"
+            " border-radius: 10px;"
+            "}"
+        )
+
+        def _build_grid_cell(
+            parent: QWidget,
+            button: QPushButton,
+            description_text: str,
+        ) -> QWidget:
+            cell = QWidget(parent)
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(8)
+            button.setStyleSheet(button_style)
+            cell_layout.addWidget(button)
+            description = QLabel(description_text, cell)
+            description.setWordWrap(True)
+            description.setStyleSheet("QLabel { color: #9ca3af; }")
+            cell_layout.addWidget(description)
+            return cell
 
         self.main_new_firmware_btn = QPushButton("New Firmware", actions_group)
         self.main_new_firmware_btn.clicked.connect(self._go_to_configuration_tab)
-        actions_layout.addWidget(self.main_new_firmware_btn)
         actions_layout.addWidget(
-            QLabel(
-                "Open Configuration to build a new printer profile from presets.",
+            _build_grid_cell(
                 actions_group,
-            )
+                self.main_new_firmware_btn,
+                "Open Configuration to build a new printer profile from presets.",
+            ),
+            0,
+            0,
         )
 
         self.main_modify_existing_btn = QPushButton("Modify Existing", actions_group)
         self.main_modify_existing_btn.clicked.connect(self._go_to_modify_existing_tab)
-        actions_layout.addWidget(self.main_modify_existing_btn)
         actions_layout.addWidget(
-            QLabel(
-                "Open the remote workflow for live SSH config editing, upload, and restart testing.",
+            _build_grid_cell(
                 actions_group,
-            )
+                self.main_modify_existing_btn,
+                "Open the remote workflow for live SSH config editing, upload, and restart testing.",
+            ),
+            0,
+            1,
         )
 
         self.main_connect_manage_btn = QPushButton("Connect/Manage Printer", actions_group)
         self.main_connect_manage_btn.clicked.connect(self._go_to_ssh_tab)
-        actions_layout.addWidget(self.main_connect_manage_btn)
         actions_layout.addWidget(
-            QLabel(
-                "Go to SSH for connect/discovery/deploy and then use Manage Printer for direct file operations.",
+            _build_grid_cell(
                 actions_group,
-            )
+                self.main_connect_manage_btn,
+                "Open Printer Connection, then use Manage Printer for direct file operations.",
+            ),
+            1,
+            0,
         )
 
         self.main_about_btn = QPushButton("About", actions_group)
         self.main_about_btn.clicked.connect(self._show_about_window)
-        actions_layout.addWidget(self.main_about_btn)
         actions_layout.addWidget(
-            QLabel(
-                "Open About from Help for mission, creator info, and platform details.",
+            _build_grid_cell(
                 actions_group,
-            )
+                self.main_about_btn,
+                "Open About for mission, creator info, and platform details.",
+            ),
+            1,
+            1,
         )
+
+        actions_layout.setColumnStretch(0, 1)
+        actions_layout.setColumnStretch(1, 1)
 
         layout.addWidget(actions_group)
         layout.addStretch(1)
@@ -2963,19 +3370,6 @@ QGroupBox::title {
         self.modify_editor = QPlainTextEdit(tab)
         self.modify_editor.textChanged.connect(self._update_action_enablement)
         layout.addWidget(self.modify_editor, 1)
-
-        (
-            modify_log_section,
-            self.modify_log_section_toggle,
-            self.modify_log_section_content,
-            modify_log_layout,
-        ) = self._build_collapsible_section("Console Log", tab, expanded=False)
-
-        self.modify_log = QPlainTextEdit(self.modify_log_section_content)
-        self.modify_log.setReadOnly(True)
-        self.modify_log.setMaximumBlockCount(2000)
-        modify_log_layout.addWidget(self.modify_log, 1)
-        layout.addWidget(modify_log_section, 1)
 
         self.ssh_host_edit.textChanged.connect(self._refresh_modify_connection_summary)
         self.ssh_username_edit.textChanged.connect(self._refresh_modify_connection_summary)
@@ -3177,7 +3571,7 @@ QGroupBox::title {
 
         grid.addWidget(wizard_group, 0, 0)
 
-        options_group = QGroupBox("Macro Packs and Add-ons", tab)
+        options_group = QGroupBox("Macro Packs", tab)
         options_layout = QVBoxLayout(options_group)
         options_layout.setSpacing(6)
 
@@ -3227,6 +3621,7 @@ QGroupBox::title {
         addons_layout.addStretch(1)
         addons_section_layout.addWidget(self.addons_group)
         options_layout.addWidget(addons_section)
+        addons_section.setVisible(False)
 
         (
             led_section,
@@ -3301,10 +3696,11 @@ QGroupBox::title {
         self.addon_package_details_view = QPlainTextEdit(self.addon_details_section_content)
         self.addon_package_details_view.setReadOnly(True)
         self.addon_package_details_view.setPlaceholderText(
-            "Enable add-ons to preview learned package include files and template mapping."
+            "Add-on support is temporarily disabled in this build."
         )
         addon_details_layout.addWidget(self.addon_package_details_view, 1)
         options_layout.addWidget(addon_details_section)
+        addon_details_section.setVisible(False)
 
         grid.addWidget(options_group, 1, 0)
 
@@ -3850,12 +4246,37 @@ QGroupBox::title {
         self.ssh_connection_name_edit.setPlaceholderText("My Printer")
         connection_form.addRow("Connection name", self.ssh_connection_name_edit)
 
+        default_row = QWidget(connection_group)
+        default_layout = QHBoxLayout(default_row)
+        default_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.ssh_default_connection_label = QLabel("Default: (none)", default_row)
+        self.ssh_default_connection_label.setWordWrap(True)
+        default_layout.addWidget(self.ssh_default_connection_label, 1)
+
+        self.ssh_set_default_btn = QPushButton("Set Default", default_row)
+        self.ssh_set_default_btn.clicked.connect(self._set_default_saved_connection_from_selection)
+        default_layout.addWidget(self.ssh_set_default_btn)
+
+        self.ssh_clear_default_btn = QPushButton("Clear Default", default_row)
+        self.ssh_clear_default_btn.clicked.connect(self._clear_default_saved_connection)
+        default_layout.addWidget(self.ssh_clear_default_btn)
+        connection_form.addRow(default_row)
+
         self.ssh_save_on_success_checkbox = QCheckBox(
             "Save on successful connect (uses Connection name)",
             connection_group,
         )
         self.ssh_save_on_success_checkbox.setChecked(True)
         connection_form.addRow(self.ssh_save_on_success_checkbox)
+
+        self.ssh_auto_connect_checkbox = QCheckBox(
+            "Auto-connect on launch",
+            connection_group,
+        )
+        self.ssh_auto_connect_checkbox.setChecked(self.auto_connect_enabled)
+        self.ssh_auto_connect_checkbox.toggled.connect(self._set_auto_connect_enabled)
+        connection_form.addRow(self.ssh_auto_connect_checkbox)
 
         self.ssh_remote_dir_edit = QLineEdit(connection_group)
         self.ssh_remote_dir_edit.setText("~/printer_data/config")
@@ -3866,61 +4287,6 @@ QGroupBox::title {
         connection_form.addRow("Remote file", self.ssh_remote_fetch_path_edit)
 
         layout.addWidget(connection_group)
-
-        discovery_group = QGroupBox("Printer Discovery", tab)
-        discovery_layout = QVBoxLayout(discovery_group)
-        discovery_form = QFormLayout()
-
-        suggested_cidrs = self.discovery_service.suggest_scan_cidrs()
-        self.scan_cidr_edit = QLineEdit(discovery_group)
-        self.scan_cidr_edit.setPlaceholderText("192.168.1.0/24")
-        self.scan_cidr_edit.setText(suggested_cidrs[0] if suggested_cidrs else "192.168.1.0/24")
-        discovery_form.addRow("CIDR range", self.scan_cidr_edit)
-
-        self.scan_timeout_spin = QDoubleSpinBox(discovery_group)
-        self.scan_timeout_spin.setRange(0.05, 3.0)
-        self.scan_timeout_spin.setDecimals(2)
-        self.scan_timeout_spin.setSingleStep(0.05)
-        self.scan_timeout_spin.setValue(0.35)
-        discovery_form.addRow("Timeout (s)", self.scan_timeout_spin)
-
-        self.scan_max_hosts_spin = QSpinBox(discovery_group)
-        self.scan_max_hosts_spin.setRange(1, 4096)
-        self.scan_max_hosts_spin.setValue(254)
-        discovery_form.addRow("Max hosts", self.scan_max_hosts_spin)
-        discovery_layout.addLayout(discovery_form)
-
-        discovery_hint = QLabel(
-            "Use Printer -> Scan Network / Use Selected Host.",
-            discovery_group,
-        )
-        discovery_hint.setWordWrap(True)
-        discovery_layout.addWidget(discovery_hint)
-
-        self.discovery_results_table = QTableWidget(discovery_group)
-        self.discovery_results_table.setColumnCount(4)
-        self.discovery_results_table.setHorizontalHeaderLabels(
-            ["Host", "Moonraker", "SSH", "Details"]
-        )
-        self.discovery_results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.discovery_results_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.discovery_results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.discovery_results_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
-        self.discovery_results_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeToContents
-        )
-        self.discovery_results_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeToContents
-        )
-        self.discovery_results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.discovery_results_table.cellDoubleClicked.connect(
-            lambda _row, _col: self._use_selected_discovery_host()
-        )
-        discovery_layout.addWidget(self.discovery_results_table, 1)
-
-        layout.addWidget(discovery_group)
 
         options_group = QGroupBox("Deploy Options", tab)
         options_form = QFormLayout(options_group)
@@ -3939,7 +4305,7 @@ QGroupBox::title {
         layout.addWidget(options_group)
 
         action_hint = QLabel(
-            "Use Printer + Configuration menus for connect, remote config actions, and deploy workflows.",
+            "Use Tools -> Scan For Printers... to discover hosts, then use Printer + Configuration menus for workflows.",
             tab,
         )
         action_hint.setWordWrap(True)
@@ -3952,18 +4318,7 @@ QGroupBox::title {
         ssh_actions_row.addStretch(1)
         layout.addLayout(ssh_actions_row)
 
-        (
-            ssh_log_section,
-            self.ssh_log_section_toggle,
-            self.ssh_log_section_content,
-            ssh_log_layout,
-        ) = self._build_collapsible_section("Console Log", tab, expanded=False)
-
-        self.ssh_log = QPlainTextEdit(self.ssh_log_section_content)
-        self.ssh_log.setReadOnly(True)
-        self.ssh_log.setMaximumBlockCount(2000)
-        ssh_log_layout.addWidget(self.ssh_log, 1)
-        layout.addWidget(ssh_log_section, 1)
+        layout.addStretch(1)
         self.ssh_host_edit.textChanged.connect(self._update_action_enablement)
         self.ssh_username_edit.textChanged.connect(self._update_action_enablement)
         self._refresh_saved_connection_profiles()
@@ -4041,7 +4396,7 @@ QGroupBox::title {
         self.manage_refactor_file_btn.clicked.connect(self._manage_refactor_current_file)
         action_row.addWidget(self.manage_refactor_file_btn)
 
-        self.manage_open_control_btn = QPushButton("Open Control Window", tab)
+        self.manage_open_control_btn = QPushButton("Open Control In Tab", tab)
         self.manage_open_control_btn.clicked.connect(self._manage_open_control_window)
         action_row.addWidget(self.manage_open_control_btn)
 
@@ -4115,20 +4470,30 @@ QGroupBox::title {
 
         layout.addWidget(backup_group)
 
-        (
-            manage_log_section,
-            self.manage_log_section_toggle,
-            self.manage_log_section_content,
-            manage_log_layout,
-        ) = self._build_collapsible_section("Console Log", tab, expanded=False)
-
-        self.manage_log = QPlainTextEdit(self.manage_log_section_content)
-        self.manage_log.setReadOnly(True)
-        self.manage_log.setMaximumBlockCount(1000)
-        manage_log_layout.addWidget(self.manage_log, 1)
-        layout.addWidget(manage_log_section, 1)
-
         self.ssh_remote_dir_edit.textChanged.connect(self._sync_manage_remote_dir_from_ssh)
+        return tab
+
+    def _build_printers_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        if QWebEngineView is None:
+            self.printers_embedded_control_view = None
+            unavailable = QLabel(
+                (
+                    "Embedded printer web view is unavailable in this build. "
+                    "Use Printer -> Open Control UI (Mainsail/Fluidd)."
+                ),
+                tab,
+            )
+            unavailable.setWordWrap(True)
+            unavailable.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(unavailable, 1)
+        else:
+            self.printers_embedded_control_view = QWebEngineView(tab)
+            self.printers_embedded_control_view.setUrl(QUrl("about:blank"))
+            layout.addWidget(self.printers_embedded_control_view, 1)
         return tab
 
     def _load_presets(self) -> None:
@@ -4310,28 +4675,12 @@ QGroupBox::title {
         self.probe_type_combo.blockSignals(False)
 
     def _apply_addon_support(self, preset: Preset) -> None:
-        supported = {
-            addon_name
-            for addon_name in self.addon_checkboxes
-            if addon_supported_for_preset(
-                addon_name,
-                preset_id=preset.id,
-                preset_family=preset.family,
-                preset_supported_addons=preset.supported_addons,
-            )
-        }
-        for addon_name in preset.supported_addons:
-            if addon_name not in self.addon_checkboxes:
-                self._add_addon_checkbox(addon_name)
-                supported.add(addon_name)
-
-        for addon_name, checkbox in self.addon_checkboxes.items():
-            is_supported = addon_name in supported
-            checkbox.setEnabled(is_supported)
-            if not is_supported:
-                checkbox.blockSignals(True)
-                checkbox.setChecked(False)
-                checkbox.blockSignals(False)
+        _ = preset
+        for checkbox in self.addon_checkboxes.values():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.setEnabled(False)
+            checkbox.blockSignals(False)
 
     def _add_addon_checkbox(self, addon_name: str) -> None:
         if addon_name in self.addon_checkboxes:
@@ -4339,9 +4688,7 @@ QGroupBox::title {
         if not hasattr(self, "addons_layout"):
             return
 
-        profile = get_addon_profile(addon_name)
-        label = profile.label if profile else addon_name
-        checkbox = QCheckBox(label, self.addons_group)
+        checkbox = QCheckBox(addon_name, self.addons_group)
         checkbox.setObjectName(f"addon_{addon_name}")
         checkbox.toggled.connect(
             lambda checked, name=addon_name: self._on_addon_checkbox_toggled(name, checked)
@@ -4377,11 +4724,7 @@ QGroupBox::title {
         ]
 
     def _collect_addons(self) -> list[str]:
-        return [
-            name
-            for name, checkbox in self.addon_checkboxes.items()
-            if checkbox.isChecked() and checkbox.isEnabled()
-        ]
+        return []
 
     @staticmethod
     def _format_section_value_map(section_map: dict[str, dict[str, str]]) -> str:
@@ -4438,47 +4781,10 @@ QGroupBox::title {
     def _update_addon_package_details(self, project: ProjectConfig | None = None) -> None:
         if not hasattr(self, "addon_package_details_view"):
             return
-        active_project = project
-        if active_project is None:
-            try:
-                active_project = self._build_project_from_ui()
-            except Exception:  # noqa: BLE001
-                active_project = self.current_project
-        if active_project is None:
-            self.addon_package_details_view.setPlainText("No active project.")
-            return
-
-        selected_addons = active_project.addons
-        if not selected_addons:
-            self.addon_package_details_view.setPlainText(
-                "No add-ons enabled. Enable an add-on to view package details."
-            )
-            return
-
-        lines: list[str] = []
-        addon_config_map = active_project.addon_configs.model_dump(mode="json")
-        for addon_id in selected_addons:
-            profile = get_addon_profile(addon_id)
-            lines.append(f"{addon_id}:")
-            if profile is not None:
-                lines.append(f"  label: {profile.label}")
-                lines.append(f"  template: {profile.template}")
-                if profile.include_files:
-                    lines.append(f"  include_files: {', '.join(profile.include_files)}")
-                if profile.package_templates:
-                    lines.append("  package_templates:")
-                    for output_path, template_name in profile.package_templates.items():
-                        lines.append(f"    - {output_path} -> {template_name}")
-                lines.append(f"  learned: {'yes' if profile.learned else 'no'}")
-            config_payload = addon_config_map.get(addon_id)
-            if isinstance(config_payload, dict):
-                include_files = config_payload.get("include_files") or []
-                if include_files:
-                    lines.append(
-                        "  detected_include_files: " + ", ".join(str(item) for item in include_files)
-                    )
-            lines.append("")
-        self.addon_package_details_view.setPlainText("\n".join(lines).strip())
+        _ = project
+        self.addon_package_details_view.setPlainText(
+            "Add-on support is temporarily disabled in this build."
+        )
 
     def _build_project_from_ui(self) -> ProjectConfig:
         if self.current_preset is None:
@@ -4894,7 +5200,7 @@ QGroupBox::title {
         )
         can_validate = self._can_validate_current_context()
         can_upload_generated = self._can_upload_generated_pack()
-        can_upload_current = self._can_upload_current_context()
+        can_upload_current = self.device_connected and self._can_upload_current_context()
         has_ssh_target = self._has_ssh_target_configured()
         can_restart = self.device_connected and has_ssh_target
 
@@ -4911,9 +5217,13 @@ QGroupBox::title {
         if hasattr(self, "printer_upload_action"):
             self.printer_upload_action.setEnabled(can_upload_current)
         if hasattr(self, "printer_connect_action"):
-            self.printer_connect_action.setEnabled(has_ssh_target)
+            self.printer_connect_action.setEnabled(has_ssh_target and not self.auto_connect_in_progress)
         if hasattr(self, "printer_disconnect_action"):
             self.printer_disconnect_action.setEnabled(self.device_connected)
+        if hasattr(self, "tools_connect_action"):
+            self.tools_connect_action.setEnabled(
+                has_ssh_target and not self.auto_connect_in_progress
+            )
         if hasattr(self, "printer_restart_klipper_action"):
             self.printer_restart_klipper_action.setEnabled(can_restart)
         if hasattr(self, "printer_restart_host_action"):
@@ -5692,7 +6002,7 @@ QGroupBox::title {
             for name, checkbox in self.macro_checkboxes.items():
                 checkbox.setChecked(name in project.macro_packs)
             for name, checkbox in self.addon_checkboxes.items():
-                checkbox.setChecked(name in project.addons and checkbox.isEnabled())
+                checkbox.setChecked(False)
 
             self._replace_overrides(project.advanced_overrides)
             self._sync_toolhead_controls()
@@ -5778,7 +6088,28 @@ QGroupBox::title {
             lines.append("No board selected.")
         self.board_summary.setPlainText("\n".join(lines))
 
+    def _ensure_printer_discovery_window(self) -> PrinterDiscoveryWindow:
+        if self.printer_discovery_window is not None:
+            return self.printer_discovery_window
+
+        suggested_cidrs = self.discovery_service.suggest_scan_cidrs()
+        discovery_window = PrinterDiscoveryWindow(suggested_cidrs=suggested_cidrs, parent=self)
+        discovery_window.scan_network_btn.clicked.connect(self._scan_for_printers)
+        discovery_window.use_selected_host_btn.clicked.connect(self._use_selected_discovery_host)
+        discovery_window.discovery_results_table.cellDoubleClicked.connect(
+            lambda _row, _col: self._use_selected_discovery_host()
+        )
+
+        self.printer_discovery_window = discovery_window
+        self.scan_cidr_edit = discovery_window.scan_cidr_edit
+        self.scan_timeout_spin = discovery_window.scan_timeout_spin
+        self.scan_max_hosts_spin = discovery_window.scan_max_hosts_spin
+        self.discovery_results_table = discovery_window.discovery_results_table
+        self.scan_network_btn = discovery_window.scan_network_btn
+        return discovery_window
+
     def _scan_for_printers(self) -> None:
+        self._ensure_printer_discovery_window()
         cidr = self.scan_cidr_edit.text().strip()
         timeout = float(self.scan_timeout_spin.value())
         max_hosts = int(self.scan_max_hosts_spin.value())
@@ -5840,6 +6171,7 @@ QGroupBox::title {
             self.discovery_results_table.setCurrentCell(0, 0)
 
     def _use_selected_discovery_host(self) -> None:
+        self._ensure_printer_discovery_window()
         selected = self.discovery_results_table.selectedItems()
         if not selected:
             self._show_error("Discovery", "Select a discovered host first.")
@@ -5916,54 +6248,75 @@ QGroupBox::title {
 
     def _resolve_manage_control_url(self) -> str:
         manual_url = self.manage_control_url_edit.text().strip()
-        source = manual_url or self._resolve_manage_host()
+        source = manual_url or self.ssh_host_edit.text().strip() or self._resolve_manage_host()
         normalized = self._normalize_control_url(source)
         if normalized:
             return normalized
         if manual_url:
             self._show_error(
-                "Manage Printer",
+                "Printers",
                 "Control URL is invalid. Example: http://192.168.1.20/ or printer.local.",
             )
         else:
-            self._show_error("Manage Printer", "Set a host in SSH or Manage Printer tab.")
+            self._show_error("Printers", "Set a host in the Printer Connection window.")
         return ""
-
-    def _create_control_window(self, url: str) -> QMainWindow:
-        return PrinterControlWindow(url, self)
-
-    def _on_manage_control_window_closed(self, window: QMainWindow) -> None:
-        self.manage_control_windows = [
-            open_window for open_window in self.manage_control_windows if open_window is not window
-        ]
 
     def _manage_open_control_window(self) -> None:
         control_url = self._resolve_manage_control_url()
         if not control_url:
             return
 
-        try:
-            control_window = self._create_control_window(control_url)
-        except RuntimeError as exc:
-            opened = QDesktopServices.openUrl(QUrl(control_url))
-            if opened:
-                self._append_manage_log(f"{exc} Opened in external browser: {control_url}")
-                self.statusBar().showMessage("Embedded view unavailable; opened browser", 3500)
+        self.tabs.setCurrentWidget(self.printers_tab)
+        embedded_view = getattr(self, "printers_embedded_control_view", None)
+        if embedded_view is not None:
+            try:
+                embedded_view.setUrl(QUrl(control_url))
+            except RuntimeError as exc:
+                opened = QDesktopServices.openUrl(QUrl(control_url))
+                if opened:
+                    self._append_manage_log(f"{exc} Opened in external browser: {control_url}")
+                    self.statusBar().showMessage("Embedded view unavailable; opened browser", 3500)
+                    self.app_state_store.update_ui(active_route="printers", right_panel_mode="context")
+                    return
+                self._show_error("Manage Printer", str(exc))
                 return
-            self._show_error("Manage Printer", str(exc))
+            self._append_manage_log(f"Opened control view in tab: {control_url}")
+            self.statusBar().showMessage(f"Control view opened: {control_url}", 3000)
+            self.app_state_store.update_ui(active_route="printers", right_panel_mode="context")
             return
 
-        self.manage_control_windows.append(control_window)
-        control_window.destroyed.connect(
-            lambda *_args, control_ref=control_window: self._on_manage_control_window_closed(
-                control_ref
+        opened = QDesktopServices.openUrl(QUrl(control_url))
+        if opened:
+            self._append_manage_log(
+                f"Embedded view unavailable. Opened in external browser: {control_url}"
             )
-        )
-        control_window.show()
-        control_window.raise_()
-        control_window.activateWindow()
-        self._append_manage_log(f"Opened control window: {control_url}")
-        self.statusBar().showMessage(f"Control window opened: {control_url}", 3000)
+            self.statusBar().showMessage("Embedded view unavailable; opened browser", 3500)
+            self.app_state_store.update_ui(active_route="printers", right_panel_mode="context")
+            return
+
+        self._show_error("Printers", "Unable to open embedded or external control view.")
+
+    def _manage_reload_embedded_control_view(self) -> None:
+        embedded_view = getattr(self, "printers_embedded_control_view", None)
+        if embedded_view is None:
+            self._manage_open_control_window()
+            return
+        try:
+            embedded_view.reload()
+        except RuntimeError as exc:
+            self._show_error("Manage Printer", str(exc))
+            return
+        self.statusBar().showMessage("Control view reloaded", 2500)
+
+    def _manage_open_control_external(self) -> None:
+        control_url = self._resolve_manage_control_url()
+        if not control_url:
+            return
+        if QDesktopServices.openUrl(QUrl(control_url)):
+            self._append_manage_log(f"Opened control URL in browser: {control_url}")
+            self.statusBar().showMessage("Opened control URL in browser", 2500)
+            return
+        self._show_error("Manage Printer", "Could not open external browser for control URL.")
 
     def _collect_manage_params(self) -> dict[str, Any] | None:
         host = self._resolve_manage_host()
@@ -5974,7 +6327,10 @@ QGroupBox::title {
 
     def _append_manage_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.manage_log.appendPlainText(f"[{stamp}] {message}")
+        line = f"[{stamp}] {message}"
+        self.manage_log.appendPlainText(line)
+        if hasattr(self, "console_activity_log"):
+            self.console_activity_log.appendPlainText(f"[MANAGE] {line}")
 
     def _manage_resolve_root_directory(self) -> str:
         return self.manage_remote_dir_edit.text().strip() or self.ssh_remote_dir_edit.text().strip()
@@ -6531,28 +6887,38 @@ QGroupBox::title {
         if file_path:
             self.ssh_key_path_edit.setText(file_path)
 
-    def _get_ssh_service(self) -> SSHDeployService | None:
+    def _get_ssh_service(self, *, show_errors: bool = True) -> SSHDeployService | None:
         if self.ssh_service is not None:
             return self.ssh_service
         try:
             self.ssh_service = SSHDeployService()
         except SSHDeployError as exc:
             self._set_device_connection_health(False, str(exc))
-            self._show_error("SSH Unavailable", str(exc))
+            if show_errors:
+                self._show_error("SSH Unavailable", str(exc))
+            else:
+                self._append_ssh_log(f"SSH unavailable: {exc}")
             return None
         return self.ssh_service
 
-    def _collect_ssh_params(self, host_override: str | None = None) -> dict[str, Any] | None:
+    def _collect_ssh_params(
+        self,
+        host_override: str | None = None,
+        *,
+        show_errors: bool = True,
+    ) -> dict[str, Any] | None:
         host = host_override.strip() if host_override else self.ssh_host_edit.text().strip()
         username = self.ssh_username_edit.text().strip()
         if not host or not username:
-            self._show_error("SSH Input Error", "Host and username are required.")
+            if show_errors:
+                self._show_error("SSH Input Error", "Host and username are required.")
             return None
 
         key_path = self.ssh_key_path_edit.text().strip() or None
         password = self.ssh_password_edit.text() or None
         if key_path and not Path(key_path).exists():
-            self._show_error("SSH Input Error", f"SSH key does not exist: {key_path}")
+            if show_errors:
+                self._show_error("SSH Input Error", f"SSH key does not exist: {key_path}")
             return None
 
         return {
@@ -6568,6 +6934,7 @@ QGroupBox::title {
             names = self.saved_connection_service.list_names()
         except OSError as exc:
             self._append_ssh_log(f"Failed to load saved connections: {exc}")
+            self._update_default_connection_ui([])
             self._refresh_tools_connect_menu()
             return
 
@@ -6578,21 +6945,28 @@ QGroupBox::title {
             self.ssh_saved_connection_combo.blockSignals(False)
 
             target_name = (select_name or "").strip()
+            if not target_name:
+                default_name = self.default_ssh_connection_name.strip()
+                if default_name and default_name in names:
+                    target_name = default_name
+
             if target_name:
                 index = self.ssh_saved_connection_combo.findText(target_name)
                 if index >= 0:
                     self.ssh_saved_connection_combo.setCurrentIndex(index)
-                    self._refresh_tools_connect_menu()
-                    return
-            if self.ssh_saved_connection_combo.count() > 0:
+                elif self.ssh_saved_connection_combo.count() > 0:
+                    self.ssh_saved_connection_combo.setCurrentIndex(0)
+            elif self.ssh_saved_connection_combo.count() > 0:
                 self.ssh_saved_connection_combo.setCurrentIndex(0)
 
+        self._update_default_connection_ui(names)
         self._refresh_tools_connect_menu()
 
     def _refresh_tools_connect_menu(self) -> None:
         if not hasattr(self, "tools_connect_menu"):
             return
 
+        default_name = self.default_ssh_connection_name.strip()
         self.tools_connect_menu.clear()
         self.tools_connect_action = QAction("Current SSH Fields", self.tools_connect_menu)
         self.tools_connect_action.triggered.connect(self._connect_ssh_to_host)
@@ -6617,7 +6991,10 @@ QGroupBox::title {
             return
 
         for profile_name in saved_profiles:
-            profile_action = QAction(profile_name, self.tools_connect_menu)
+            label = profile_name
+            if default_name and profile_name == default_name:
+                label = f"{profile_name} (default)"
+            profile_action = QAction(label, self.tools_connect_menu)
             profile_action.triggered.connect(
                 lambda checked=False, name=profile_name: self._connect_saved_connection(name)
             )
@@ -6653,6 +7030,14 @@ QGroupBox::title {
         except (OSError, ValueError) as exc:
             self._show_error("Saved Connections", str(exc))
             return False
+
+        if not self.default_ssh_connection_name:
+            try:
+                saved_names = self.saved_connection_service.list_names()
+            except OSError:
+                saved_names = []
+            if len(saved_names) == 1 and saved_names[0] == profile_name:
+                self._persist_default_ssh_connection(profile_name)
 
         self._refresh_saved_connection_profiles(select_name=profile_name)
         self.ssh_connection_name_edit.setText(profile_name)
@@ -6738,6 +7123,8 @@ QGroupBox::title {
             return
         deleted = self.saved_connection_service.delete(profile_name)
         if deleted:
+            if self.default_ssh_connection_name == profile_name:
+                self._persist_default_ssh_connection("")
             self._append_ssh_log(f"Deleted connection profile '{profile_name}'.")
             self.statusBar().showMessage(f"Deleted connection '{profile_name}'", 2500)
             self._refresh_saved_connection_profiles()
@@ -6759,11 +7146,17 @@ QGroupBox::title {
 
     def _append_ssh_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.ssh_log.appendPlainText(f"[{stamp}] {message}")
+        line = f"[{stamp}] {message}"
+        self.ssh_log.appendPlainText(line)
+        if hasattr(self, "console_activity_log"):
+            self.console_activity_log.appendPlainText(f"[SSH] {line}")
 
     def _append_modify_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.modify_log.appendPlainText(f"[{stamp}] {message}")
+        line = f"[{stamp}] {message}"
+        self.modify_log.appendPlainText(line)
+        if hasattr(self, "console_activity_log"):
+            self.console_activity_log.appendPlainText(f"[MODIFY] {line}")
 
     def _set_modify_status(self, message: str, severity: str = "info") -> None:
         style_by_severity = {
@@ -7107,7 +7500,82 @@ QGroupBox::title {
             return saved_name
         return host
 
+    def _apply_connect_success(
+        self,
+        params: dict[str, Any],
+        output: str,
+        *,
+        source: str = "manual",
+    ) -> None:
+        self._set_device_connection_health(True, str(output))
+        printer_name = self._resolve_connected_printer_name(str(params["host"]))
+        self.preview_connected_printer_name = printer_name
+        self.preview_connected_host = str(params["host"])
+        self._set_manage_connected_printer_display(
+            printer_name=printer_name,
+            host=str(params["host"]),
+            connected=True,
+        )
+        self._set_modify_connected_printer_display(
+            printer_name=printer_name,
+            host=str(params["host"]),
+            connected=True,
+        )
+        self.manage_host_edit.setText(str(params["host"]).strip())
+        self._append_manage_log(f"Connected printer: {printer_name} ({params['host']})")
+        self._append_ssh_log(f"Connected: {output}")
+        self._append_modify_log(f"Connected: {output}")
+        self._set_modify_status(f"Connected to {printer_name}", severity="ok")
+        self._save_successful_connection_profile()
+        if source == "startup":
+            self.statusBar().showMessage(f"Auto-connected to {printer_name}", 3000)
+        else:
+            self.statusBar().showMessage(f"Connected to {printer_name}", 2500)
+        self.action_log_service.log_event(
+            "connect",
+            phase="complete",
+            host=str(params["host"]),
+            printer_name=printer_name,
+            output=str(output),
+            source=source,
+        )
+
+    def _apply_connect_failure(
+        self,
+        params: dict[str, Any],
+        output: str,
+        *,
+        source: str = "manual",
+        show_error_dialog: bool = False,
+        use_failure_prefix: bool = True,
+    ) -> None:
+        self._set_device_connection_health(False, str(output))
+        self.preview_connected_printer_name = None
+        self.preview_connected_host = None
+        self._set_manage_connected_printer_display(None, None, connected=False)
+        self._set_modify_connected_printer_display(None, None, connected=False)
+        if use_failure_prefix:
+            self._append_ssh_log(f"Connection failed: {output}")
+            self._append_modify_log(f"Connection failed: {output}")
+        else:
+            self._append_ssh_log(str(output))
+            self._append_modify_log(f"Connect failed: {output}")
+        self._set_modify_status(f"Connection failed: {output}", severity="error")
+        if show_error_dialog:
+            self._show_error("SSH Connect Failed", str(output))
+        self.action_log_service.log_event(
+            "connect",
+            phase="failed",
+            host=str(params.get("host") or ""),
+            output=str(output),
+            source=source,
+        )
+
     def _connect_ssh_to_host(self) -> None:
+        if self.auto_connect_in_progress:
+            self.statusBar().showMessage("Connect already in progress...", 2500)
+            return
+
         service = self._get_ssh_service()
         if service is None:
             return
@@ -7129,69 +7597,19 @@ QGroupBox::title {
         try:
             ok, output = service.test_connection(**params)
         except SSHDeployError as exc:
-            self._set_device_connection_health(False, str(exc))
-            self.preview_connected_printer_name = None
-            self.preview_connected_host = None
-            self._set_manage_connected_printer_display(None, None, connected=False)
-            self._set_modify_connected_printer_display(None, None, connected=False)
-            self._append_ssh_log(str(exc))
-            self._append_modify_log(f"Connect failed: {exc}")
-            self._set_modify_status(str(exc), severity="error")
-            self._show_error("SSH Connect Failed", str(exc))
-            self.action_log_service.log_event(
-                "connect",
-                phase="failed",
-                host=str(params["host"]),
-                error=str(exc),
+            self._apply_connect_failure(
+                params,
+                str(exc),
+                source="manual",
+                show_error_dialog=True,
+                use_failure_prefix=False,
             )
             return
 
         if ok:
-            self._set_device_connection_health(True, str(output))
-            printer_name = self._resolve_connected_printer_name(str(params["host"]))
-            self.preview_connected_printer_name = printer_name
-            self.preview_connected_host = str(params["host"])
-            self._set_manage_connected_printer_display(
-                printer_name=printer_name,
-                host=str(params["host"]),
-                connected=True,
-            )
-            self._set_modify_connected_printer_display(
-                printer_name=printer_name,
-                host=str(params["host"]),
-                connected=True,
-            )
-            self.manage_host_edit.setText(str(params["host"]).strip())
-            self._append_manage_log(
-                f"Connected printer: {printer_name} ({params['host']})"
-            )
-            self._append_ssh_log(f"Connected: {output}")
-            self._append_modify_log(f"Connected: {output}")
-            self._set_modify_status(f"Connected to {printer_name}", severity="ok")
-            self._save_successful_connection_profile()
-            self.statusBar().showMessage(f"Connected to {printer_name}", 2500)
-            self.action_log_service.log_event(
-                "connect",
-                phase="complete",
-                host=str(params["host"]),
-                printer_name=printer_name,
-                output=str(output),
-            )
+            self._apply_connect_success(params, str(output), source="manual")
             return
-        self._set_device_connection_health(False, str(output))
-        self.preview_connected_printer_name = None
-        self.preview_connected_host = None
-        self._set_manage_connected_printer_display(None, None, connected=False)
-        self._set_modify_connected_printer_display(None, None, connected=False)
-        self._append_ssh_log(f"Connection failed: {output}")
-        self._append_modify_log(f"Connection failed: {output}")
-        self._set_modify_status(f"Connection failed: {output}", severity="error")
-        self.action_log_service.log_event(
-            "connect",
-            phase="failed",
-            host=str(params["host"]),
-            output=str(output),
-        )
+        self._apply_connect_failure(params, str(output), source="manual", show_error_dialog=False)
 
     def _test_ssh_connection(self) -> None:
         self._connect_ssh_to_host()
@@ -7336,6 +7754,8 @@ QGroupBox::title {
         return f"{profile.label} ({board_id})"
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
+        if hasattr(self, "auto_connect_poll_timer"):
+            self.auto_connect_poll_timer.stop()
         self._persist_preview_settings()
         self.app_state_store.unsubscribe(self._on_app_state_changed)
         super().closeEvent(event)

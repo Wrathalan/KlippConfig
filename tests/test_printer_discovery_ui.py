@@ -9,6 +9,9 @@ def test_scan_populates_results_and_sets_host(qtbot, monkeypatch) -> None:
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    window._open_printer_discovery()
+    assert window.printer_discovery_window is not None
+    assert window.printer_discovery_window.isVisible()
 
     fake_results = [
         DiscoveredPrinter(

@@ -17,10 +17,9 @@ If you are new to Klipper, start with the main `README.md` first.
 - Separate USB/CAN toolhead board selection and `toolhead.cfg` generation
 - Includes LDO Nitehawk toolhead board options
 - Expanded mainboard catalog with board pin aliases and board layout output
-- Config bundle system for drop-in board/toolhead/add-on support (`%APPDATA%\KlippConfig\bundles`)
-- `Tools -> Learn Add-ons from Imported Config` to ingest KAMP/StealthBurner LEDs/Timelapse into user bundles
+- Config bundle system for drop-in board/toolhead support (`%APPDATA%\KlippConfig\bundles`)
 - LED control settings (pin, chain count, color order, initial color) with generated `leds.cfg`
-- Add-on packs including AMS-style systems plus KAMP/StealthBurner LEDs/Timelapse mappings
+- Add-ons are temporarily disabled in the app while that workflow is being reworked
 - Files tab with raw/form `.cfg` editing and section override editor
 - Firmware tools for existing `.cfg` files: one-click refactor and role-aware validation
 - Include-graph validation from imported root configs (wildcards, unresolved includes, cycle/conflict detection)
@@ -33,10 +32,11 @@ If you are new to Klipper, start with the main `README.md` first.
 - Open existing `.cfg` files directly in-app
 - Footer device-health icon (red/green) reflects current SSH connection health
 - Live SSH deploy to Klipper hosts (connect, upload, optional restart)
-- `Tools -> Printer Connection` menu for connect/open remote/explore config/deploy/discovery actions
-- Saved SSH connection profiles (named reconnect presets)
+- `Printer -> Connection Window...` opens the dedicated SSH connect/deploy window
+- `Tools -> Scan For Printers...` opens a dedicated printer discovery window
+- Saved SSH connection profiles (named reconnect presets) in `~/.ssh/klippconfig/saved_connections.json` (outside app config and repo)
 - Saved machine import profiles for quick reopen and re-apply
-- SSH and Manage Printer console logs are collapsible and collapsed by default
+- Dedicated `Tools -> Active Console` window for SSH/Modify/Manage live logs
 - Network scanner to discover likely Klipper printers on your LAN
 - Dedicated `Modify Existing` remote workflow (connect -> open cfg -> refactor/validate -> upload with backup -> restart test)
 - `Manage Printer` tab for direct remote file editing, backups, and restore operations
@@ -48,31 +48,31 @@ If you are new to Klipper, start with the main `README.md` first.
 1. Open the `Main` tab (first tab).
 2. Click `New Firmware` to jump to `Configuration` (does not reset form state).
 3. Click `Modify Existing` to open the dedicated remote edit/upload workflow.
-4. Click `Connect/Manage Printer` to jump to `SSH`.
+4. Click `Connect/Manage Printer` to open `Printer Connection`.
 5. Click `About` to open the About window (same as `Help -> About KlippConfig`).
 
-## SSH Tab
+## Printer Connection Window
 
-1. Open the `SSH` tab.
+1. Open `Printer -> Connection Window...`.
 2. Enter or confirm SSH host, port, username, and auth credentials.
 3. Set remote Klipper config directory (default `~/printer_data/config`).
-4. Use `Tools -> Printer Connection -> Connect`.
-5. Optionally run `Tools -> Printer Connection -> Scan for Printers` and then `Use Selected Host`.
+4. Use `Printer -> Connect -> Current SSH Fields`.
+5. Optionally run `Tools -> Scan For Printers...`, then use `Use Selected Host` in that window.
 6. Set `Connection name` and keep `Save on successful connect` enabled to auto-save reconnect profiles.
 7. Use `Saved` `Load/Save/Delete` controls for quick reconnect.
-8. Use `Tools -> Printer Connection -> Open Remote File` to pull a remote cfg into `Files`.
-9. Use `Tools -> Printer Connection -> Explore Config Directory` (or the SSH-tab button) to open the connected printer's config directory in `Manage Printer`.
-10. Use `Tools -> Printer Connection -> Deploy Generated Pack` to upload the current validated pack.
+8. Use `Configuration -> Open Remote Config` to pull a remote cfg into `Files`.
+9. Use `Tools -> Explore Config Directory` (or the Printer Connection window button) to open the connected printer's config directory in `Manage Printer`.
+10. Use `Tools -> Advanced Settings -> Deploy Generated Pack` to upload the current validated pack.
 11. Optional: enable restart and provide the restart command.
 
 ## Modify Existing Tab
 
 1. Open `Modify Existing`.
-2. Click `Connect` (reuses SSH credentials from `SSH` tab).
+2. Click `Connect` (reuses SSH credentials from `Printer Connection`).
 3. Set/confirm `Remote .cfg path` and click `Open Remote .cfg`.
 4. Edit the file, then use `Refactor` and `Validate`.
 5. Click `Upload` to write changes (always creates backup first using `Backup root`).
-6. Click `Test Restart` to run the restart command and review command output in the tab log.
+6. Click `Test Restart` to run the restart command and review command output in `Tools -> Active Console`.
 
 ## Manage Printer Tab
 
@@ -101,30 +101,24 @@ If you are new to Klipper, start with the main `README.md` first.
 4. Apply selected suggestions (high-confidence suggestions are preselected by default). This applies:
 - schema v2 settings (`schema_version`, `output_layout`)
 - machine attributes
-- add-on package metadata
 - source `section_map` for source-tree reconstruction
-5. Optionally run `Tools -> Learn Add-ons from Imported Config` to generate user bundle templates from imported add-on files.
-6. Optionally save the imported profile for quick reopen using `Save Machine Profile`.
+5. Optionally save the imported profile for quick reopen using `Save Machine Profile`.
 
-## Config Bundles (Boards/Add-ons)
+## Config Bundles (Boards/Toolheads)
 
 Use bundles to add support without editing Python code:
 
 1. Create files under `%APPDATA%\KlippConfig\bundles`:
 - `boards\*.json`
 - `toolhead_boards\*.json`
-- `addons\*.json`
-- `templates\...` for add-on templates
 2. Launch/restart KlippConfig.
 3. New boards/toolhead boards appear in `Configuration`.
-4. New add-ons appear in `Configuration -> Add-ons` when compatible with the preset family.
 
 Reference examples and format docs:
 
 - `app/bundles/README.md`
 - `app/bundles/examples/boards/my_custom_mainboard.json`
 - `app/bundles/examples/toolhead_boards/my_custom_toolhead.json`
-- `app/bundles/examples/addons/chamber_heater.json`
 
 ## Project Schema v2 (Auto Migration)
 
@@ -133,7 +127,6 @@ Reference examples and format docs:
 - `schema_version: 2`
 - `output_layout` (`source_tree` or `modular`)
 - `machine_attributes`
-- `addon_configs`
 - `section_map`
 - When re-saved, projects are written as schema v2 automatically.
 

@@ -70,7 +70,19 @@ def tokens_for_mode(mode: str) -> ThemeTokens:
 
 
 def build_base_stylesheet(mode: str) -> str:
+    normalized = (mode or "").strip().lower()
     t = tokens_for_mode(mode)
+    dark_mode = normalized == "dark"
+    route_hover_bg = "#134e4a" if dark_mode else "#ccfbf1"
+    route_hover_border = "#2dd4bf" if dark_mode else "#0f766e"
+    route_hover_text = "#ecfeff" if dark_mode else "#134e4a"
+    route_checked_bg = "#f3f4f6" if dark_mode else "#e6e8ed"
+    route_checked_text = "#111827"
+    route_checked_border = "#d1d5db" if dark_mode else t.border_strong
+    menu_hover_bg = "#134e4a" if dark_mode else "#0f766e"
+    menu_hover_text = "#ecfeff"
+    menu_selected_bg = "#2dd4bf" if dark_mode else "#99f6e4"
+    menu_selected_text = "#042f2e" if dark_mode else "#134e4a"
     return f"""
 QWidget {{
     background-color: {t.surface_app};
@@ -97,8 +109,58 @@ QMenuBar, QMenu {{
     background-color: {t.surface_menu};
     color: {t.text_primary};
 }}
+QMenuBar::item {{
+    background-color: transparent;
+    border-radius: 6px;
+    padding: 5px 10px;
+}}
+QMenuBar::item:selected {{
+    background-color: {menu_hover_bg};
+    color: {menu_hover_text};
+}}
+QMenuBar::item:pressed {{
+    background-color: {menu_selected_bg};
+    color: {menu_selected_text};
+}}
+QMenu {{
+    min-width: 270px;
+}}
+QMenu::item {{
+    padding: 6px 40px 6px 10px;
+}}
+QMenu::shortcut {{
+    padding-right: 6px;
+}}
 QMenu::item:selected {{
     background-color: {t.surface_control_hover};
+}}
+QWidget#route_nav_bar {{
+    background-color: {t.surface_menu};
+    border-top: 1px solid {t.border_default};
+    border-bottom: 1px solid {t.border_default};
+}}
+QToolButton#route_nav_button {{
+    background-color: transparent;
+    color: {t.text_primary};
+    border: 1px solid transparent;
+    border-radius: 6px;
+    min-height: 25px;
+    padding: 5px 18px;
+    font-size: 14px;
+}}
+QToolButton#route_nav_button:hover {{
+    background-color: {route_hover_bg};
+    border-color: {route_hover_border};
+    color: {route_hover_text};
+}}
+QToolButton#route_nav_button:checked {{
+    background-color: {route_checked_bg};
+    border-color: {route_checked_border};
+    color: {route_checked_text};
+    font-weight: 600;
+}}
+QToolButton#route_nav_button:checked:hover {{
+    border-color: {route_hover_border};
 }}
 QGroupBox {{
     border: 1px solid {t.border_strong};

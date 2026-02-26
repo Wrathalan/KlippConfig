@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import time
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QGroupBox
@@ -10,11 +11,14 @@ from app.services.ssh_deploy import SSHDeployError
 
 
 class FakeConnectionService:
-    def __init__(self, ok: bool, output: str) -> None:
+    def __init__(self, ok: bool, output: str, delay_seconds: float = 0.0) -> None:
         self.ok = ok
         self.output = output
+        self.delay_seconds = delay_seconds
 
     def test_connection(self, **_kwargs):
+        if self.delay_seconds > 0:
+            time.sleep(self.delay_seconds)
         return self.ok, self.output
 
 
@@ -106,7 +110,7 @@ def test_tabs_hide_advanced_and_keep_files(qtbot) -> None:
         "Main",
         "Configuration",
         "Files",
-        "SSH",
+        "Printers",
         "Modify Existing",
         "Manage Printer",
     ]
@@ -331,7 +335,7 @@ def test_macro_addon_and_led_sections_are_collapsible(qtbot) -> None:
     assert window.addons_section_toggle.isChecked() is True
     assert window.led_section_toggle.isChecked() is False
     assert window.macros_section_content.isVisible() is True
-    assert window.addons_section_content.isVisible() is True
+    assert window.addons_section_content.isVisible() is False
     assert window.led_section_content.isVisible() is False
 
     window.macros_section_toggle.setChecked(False)
@@ -352,9 +356,7 @@ def test_macro_packs_and_addons_group_is_below_core_hardware(qtbot) -> None:
 
     group_boxes = window.wizard_tab.findChildren(QGroupBox)
     core_group = next(group for group in group_boxes if group.title() == "Core Hardware")
-    options_group = next(
-        group for group in group_boxes if group.title() == "Macro Packs and Add-ons"
-    )
+    options_group = next(group for group in group_boxes if group.title() == "Macro Packs")
 
     assert options_group.y() > core_group.y()
     assert abs(options_group.x() - core_group.x()) <= 4
@@ -397,17 +399,13 @@ def test_macro_and_addon_checkboxes_update_project(qtbot) -> None:
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
     macro_checkbox = window.macro_checkboxes["core_maintenance"]
-    addon_checkbox = window.addon_checkboxes["filament_buffer"]
     _select_first_mainboard(window)
 
     macro_checkbox.setChecked(True)
-    if addon_checkbox.isEnabled():
-        addon_checkbox.setChecked(True)
 
     project = window._build_project_from_ui()
     assert "core_maintenance" in project.macro_packs
-    if addon_checkbox.isEnabled():
-        assert "filament_buffer" in project.addons
+    assert project.addons == []
 
 
 def test_toolhead_selection_updates_project(qtbot) -> None:
@@ -580,18 +578,20 @@ def test_files_sections_collapsed_by_default_and_issue_notice(qtbot) -> None:
     assert "Validation Findings (" in window.validation_section_toggle.text()
 
 
-def test_console_logs_collapsed_by_default_on_ssh_and_manage_tabs(qtbot) -> None:
+def test_console_moved_to_tools_window_and_removed_from_workflow_tabs(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
-    assert window.ssh_log_section_toggle.isChecked() is False
-    assert window.manage_log_section_toggle.isChecked() is False
-    assert window.modify_log_section_toggle.isChecked() is False
-    assert window.ssh_log_section_content.isVisible() is False
-    assert window.manage_log_section_content.isVisible() is False
-    assert window.modify_log_section_content.isVisible() is False
+    assert not hasattr(window, "ssh_log_section_toggle")
+    assert not hasattr(window, "manage_log_section_toggle")
+    assert not hasattr(window, "modify_log_section_toggle")
+
+    assert window.active_console_window is not None
+    assert window.active_console_window.isVisible() is False
+    window.tools_active_console_action.trigger()
+    assert window.active_console_window.isVisible() is True
 
     window._append_ssh_log("ssh log line")
     window._append_manage_log("manage log line")
@@ -599,6 +599,9 @@ def test_console_logs_collapsed_by_default_on_ssh_and_manage_tabs(qtbot) -> None
     assert "ssh log line" in window.ssh_log.toPlainText()
     assert "manage log line" in window.manage_log.toPlainText()
     assert "modify log line" in window.modify_log.toPlainText()
+    assert "[SSH]" in window.console_activity_log.toPlainText()
+    assert "[MANAGE]" in window.console_activity_log.toPlainText()
+    assert "[MODIFY]" in window.console_activity_log.toPlainText()
 
 
 def test_main_tab_routes_without_resetting_configuration(qtbot) -> None:
@@ -620,7 +623,8 @@ def test_main_tab_routes_without_resetting_configuration(qtbot) -> None:
 
     window.tabs.setCurrentWidget(window.main_tab)
     window.main_connect_manage_btn.click()
-    assert window.tabs.currentWidget() is window.live_deploy_tab
+    assert window.printer_connection_window is not None
+    assert window.printer_connection_window.isVisible()
 
     window.tabs.setCurrentWidget(window.main_tab)
     window.main_about_btn.click()
@@ -870,6 +874,195 @@ def test_tools_connect_menu_connects_selected_saved_profile(qtbot, tmp_path) -> 
     assert "Shop Printer" in window.manage_connected_printer_label.text()
 
 
+def test_startup_auto_connect_uses_saved_profile_async(qtbot, tmp_path) -> None:
+    saved_connections = SavedConnectionService(storage_path=tmp_path / "saved_connections.json")
+    saved_connections.save(
+        "Startup Printer",
+        {
+            "host": "192.168.1.20",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+
+    window = MainWindow(
+        saved_connection_service=saved_connections,
+        auto_connect_on_launch=True,
+    )
+    qtbot.addWidget(window)
+    window.ssh_service = FakeConnectionService(ok=True, output="ok", delay_seconds=0.25)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    qtbot.waitUntil(lambda: window.auto_connect_in_progress, timeout=4000)
+    qtbot.waitUntil(lambda: window.device_connected, timeout=6000)
+
+    assert window.ssh_connection_name_edit.text() == "Startup Printer"
+    assert "Connected" in window.device_health_icon.toolTip()
+    assert "Startup Printer" in window.manage_connected_printer_label.text()
+
+
+def test_startup_auto_connect_skips_when_multiple_profiles_and_no_default(qtbot, tmp_path) -> None:
+    saved_connections = SavedConnectionService(storage_path=tmp_path / "saved_connections.json")
+    saved_connections.save(
+        "Alpha Printer",
+        {
+            "host": "192.168.1.10",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+    saved_connections.save(
+        "Bravo Printer",
+        {
+            "host": "192.168.1.11",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+
+    settings = _temp_settings(tmp_path, "auto_connect_multi.ini")
+    window = MainWindow(
+        saved_connection_service=saved_connections,
+        app_settings=settings,
+        auto_connect_on_launch=True,
+    )
+    qtbot.addWidget(window)
+    window.ssh_service = FakeConnectionService(ok=True, output="ok", delay_seconds=0.2)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    qtbot.wait(900)
+
+    assert window.device_connected is False
+    assert "multiple saved connections found" in window.ssh_log.toPlainText().lower()
+
+
+def test_startup_auto_connect_uses_default_profile_when_multiple_saved(qtbot, tmp_path) -> None:
+    saved_connections = SavedConnectionService(storage_path=tmp_path / "saved_connections.json")
+    saved_connections.save(
+        "Alpha Printer",
+        {
+            "host": "192.168.1.10",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+    saved_connections.save(
+        "Bravo Printer",
+        {
+            "host": "192.168.1.44",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+
+    saved_connections.set_default_connection_name("Bravo Printer")
+
+    window = MainWindow(
+        saved_connection_service=saved_connections,
+        auto_connect_on_launch=True,
+    )
+    qtbot.addWidget(window)
+    window.ssh_service = FakeConnectionService(ok=True, output="ok", delay_seconds=0.2)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    qtbot.waitUntil(lambda: window.device_connected, timeout=6000)
+
+    assert window.ssh_connection_name_edit.text() == "Bravo Printer"
+    assert window.ssh_host_edit.text() == "192.168.1.44"
+
+
+def test_startup_auto_connect_can_be_disabled(qtbot, tmp_path) -> None:
+    saved_connections = SavedConnectionService(storage_path=tmp_path / "saved_connections.json")
+    saved_connections.save(
+        "Startup Printer",
+        {
+            "host": "192.168.1.20",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+
+    saved_connections.set_auto_connect_enabled(False)
+
+    window = MainWindow(
+        saved_connection_service=saved_connections,
+        auto_connect_on_launch=True,
+    )
+    qtbot.addWidget(window)
+    window.ssh_service = FakeConnectionService(ok=True, output="ok", delay_seconds=0.2)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    qtbot.wait(900)
+
+    assert window.device_connected is False
+    assert window.ssh_auto_connect_checkbox.isChecked() is False
+
+
+def test_set_default_connection_from_selection_updates_setting(qtbot, tmp_path) -> None:
+    saved_connections = SavedConnectionService(storage_path=tmp_path / "saved_connections.json")
+    saved_connections.save(
+        "Alpha Printer",
+        {
+            "host": "192.168.1.10",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+    saved_connections.save(
+        "Bravo Printer",
+        {
+            "host": "192.168.1.11",
+            "port": 22,
+            "username": "pi",
+            "password": "secret",
+            "key_path": "",
+            "remote_dir": "~/printer_data/config",
+            "remote_file": "~/printer_data/config/printer.cfg",
+        },
+    )
+
+    settings = _temp_settings(tmp_path, "default_select.ini")
+    window = MainWindow(saved_connection_service=saved_connections, app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window.ssh_saved_connection_combo.setCurrentText("Bravo Printer")
+    window._set_default_saved_connection_from_selection()
+
+    assert window.default_ssh_connection_name == "Bravo Printer"
+    assert "Bravo Printer" in window.ssh_default_connection_label.text()
+    assert saved_connections.get_default_connection_name() == "Bravo Printer"
+
+
 def test_guided_component_setup_creates_mainboard_bundle(qtbot, monkeypatch, tmp_path) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
@@ -912,7 +1105,7 @@ def test_guided_component_setup_creates_mainboard_bundle(qtbot, monkeypatch, tmp
     assert payload["mcu"] == "stm32f446xx"
 
 
-def test_guided_component_setup_creates_addon_bundle_and_template(
+def test_guided_component_setup_rejects_addon_bundle_in_disabled_mode(
     qtbot,
     monkeypatch,
     tmp_path,
@@ -942,22 +1135,14 @@ def test_guided_component_setup_creates_addon_bundle_and_template(
         "_run_guided_component_setup_wizard",
         lambda: (tmp_path, addon_spec),
     )
-    monkeypatch.setattr(
-        "app.ui.main_window.QMessageBox.information",
-        lambda *args, **kwargs: None,
-    )
     monkeypatch.setattr(window, "_refresh_bundle_backed_component_options", lambda: None)
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(window, "_show_error", lambda title, msg: errors.append((title, msg)))
 
     window._open_guided_component_setup()
 
-    addon_file = tmp_path / "addons" / "chamber_plus.json"
-    template_file = tmp_path / "templates" / "addons" / "chamber_plus.cfg.j2"
-    assert addon_file.exists()
-    assert template_file.exists()
-    addon_payload = json.loads(addon_file.read_text(encoding="utf-8"))
-    assert addon_payload["id"] == "chamber_plus"
-    assert addon_payload["template"] == "addons/chamber_plus.cfg.j2"
-    assert "CHAMBER_PLUS" in template_file.read_text(encoding="utf-8")
+    assert errors
+    assert "Add-on bundle creation is disabled" in errors[0][1]
 
 
 def test_explore_config_requires_connected_printer(qtbot, monkeypatch) -> None:
@@ -1030,15 +1215,17 @@ def test_command_bar_printer_and_tools_actions_match_expected_labels(qtbot) -> N
     qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
 
     assert window.printer_upload_action.text() == "Upload Current"
+    assert window.printer_connect_action.text() == "Connection Window..."
     assert window.tools_guided_component_setup_action.text() == "Guided Component Setup..."
-    assert window.tools_learn_addons_action.text() == "Learn Add-ons from Imported Config"
     assert window.tools_connect_menu.title() == "Connect"
     assert window.tools_connect_action.text() == "Current SSH Fields"
     assert window.tools_open_remote_action.text() == "Open Remote Config"
     assert window.tools_explore_config_action.text() == "Explore Config Directory"
     assert window.tools_deploy_action.text() == "Deploy Generated Pack"
-    assert window.tools_scan_printers_action.text() == "Scan Network"
-    assert window.tools_use_selected_host_action.text() == "Use Selected Host"
+    assert window.tools_active_console_action.text() == "Active Console"
+    assert window.tools_printer_discovery_action.text() == "Scan For Printers..."
+    assert window.tools_scan_printers_action.text() == "Scan For Printers..."
+    assert not hasattr(window, "tools_use_selected_host_action")
 
 
 def test_command_bar_primary_shortcuts_are_wired(qtbot) -> None:
@@ -1054,6 +1241,32 @@ def test_command_bar_primary_shortcuts_are_wired(qtbot) -> None:
     assert window.printer_restart_klipper_action.shortcut().toString() == "Ctrl+Shift+R"
 
 
+def test_printer_menu_actions_are_disabled_without_active_connection(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    _select_first_mainboard(window)
+    qtbot.waitUntil(lambda: not window.current_report.has_blocking)
+
+    window.ssh_host_edit.setText("192.168.1.20")
+    window.ssh_username_edit.setText("pi")
+    window._set_device_connection_health(False, "Disconnected for test")
+    window._update_action_enablement()
+
+    assert window.printer_upload_action.isEnabled() is False
+    assert window.printer_restart_klipper_action.isEnabled() is False
+    assert window.printer_restart_host_action.isEnabled() is False
+
+    window._set_device_connection_health(True, "Connected for test")
+    window._update_action_enablement()
+
+    assert window.printer_upload_action.isEnabled() is True
+    assert window.printer_restart_klipper_action.isEnabled() is True
+    assert window.printer_restart_host_action.isEnabled() is True
+
+
 def test_left_nav_has_no_legacy_route(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
@@ -1063,6 +1276,55 @@ def test_left_nav_has_no_legacy_route(qtbot) -> None:
     labels = [window.left_nav_scaffold.item(index).text() for index in range(window.left_nav_scaffold.count())]
     assert "Legacy" not in labels
     assert "Home" in labels
+    assert "Connect" not in labels
+    assert "Edit Config" not in labels
+    assert "Printers" in labels
+
+
+def test_printers_route_opens_setup_when_not_configured(qtbot, monkeypatch) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window.ssh_host_edit.clear()
+    window.ssh_username_edit.clear()
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window,
+        "_open_printer_connection_window",
+        lambda **_kwargs: calls.append("setup"),
+    )
+    monkeypatch.setattr(window, "_manage_open_control_window", lambda: calls.append("webview"))
+
+    window._on_shell_route_selected("printers")
+
+    assert calls == ["setup"]
+    assert window.app_state_store.snapshot().ui.active_route == "printers"
+
+
+def test_printers_route_opens_webview_when_configured(qtbot, monkeypatch) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window.ssh_host_edit.setText("192.168.1.20")
+    window.ssh_username_edit.setText("pi")
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window,
+        "_open_printer_connection_window",
+        lambda **_kwargs: calls.append("setup"),
+    )
+    monkeypatch.setattr(window, "_manage_open_control_window", lambda: calls.append("webview"))
+
+    window._on_shell_route_selected("printers")
+
+    assert calls == ["webview"]
+    assert window.app_state_store.snapshot().ui.active_route == "printers"
 
 
 def test_duplicate_primary_buttons_removed_from_views(qtbot) -> None:
@@ -1138,4 +1400,4 @@ def test_machine_attribute_and_addon_detail_views_update_in_configuration(qtbot)
     assert hasattr(window, "addon_package_details_view")
 
     assert window.machine_attr_mcu_view.toPlainText().strip() != ""
-    assert "No add-ons enabled" in window.addon_package_details_view.toPlainText()
+    assert "temporarily disabled" in window.addon_package_details_view.toPlainText().lower()
