@@ -83,17 +83,26 @@ def build_base_stylesheet(mode: str) -> str:
     menu_hover_text = "#ecfeff"
     menu_selected_bg = "#2dd4bf" if dark_mode else "#99f6e4"
     menu_selected_text = "#042f2e" if dark_mode else "#134e4a"
+    chrome_bg = t.surface_app
     return f"""
+QMainWindow {{
+    background-color: {chrome_bg};
+}}
 QWidget {{
     background-color: {t.surface_app};
     color: {t.text_primary};
 }}
-QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTreeWidget, QTableWidget, QTabWidget::pane {{
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTreeWidget, QTableWidget {{
     background-color: {t.surface_control};
     color: {t.text_primary};
     border: 1px solid {t.border_default};
     selection-background-color: {t.selection_bg};
     selection-color: {t.selection_text};
+}}
+QTabWidget::pane {{
+    background-color: {t.surface_app};
+    color: {t.text_primary};
+    border: 1px solid {t.border_default};
 }}
 QPushButton, QToolButton {{
     background-color: {t.surface_control_alt};
@@ -106,8 +115,14 @@ QPushButton:hover, QToolButton:hover {{
     background-color: {t.surface_control_hover};
 }}
 QMenuBar, QMenu {{
-    background-color: {t.surface_menu};
     color: {t.text_primary};
+}}
+QMenuBar {{
+    background-color: {chrome_bg};
+    border: none;
+}}
+QMenu {{
+    background-color: {t.surface_menu};
 }}
 QMenuBar::item {{
     background-color: transparent;
@@ -134,18 +149,27 @@ QMenu::shortcut {{
 QMenu::item:selected {{
     background-color: {t.surface_control_hover};
 }}
+QTabWidget#main_route_tabs::pane {{
+    background-color: {chrome_bg};
+    border: none;
+    margin: 0px;
+    padding: 0px;
+}}
 QWidget#route_nav_bar {{
-    background-color: {t.surface_menu};
-    border-top: 1px solid {t.border_default};
-    border-bottom: 1px solid {t.border_default};
+    background-color: {chrome_bg};
+    border-top: none;
+    border-bottom: none;
+    min-height: 38px;
+    max-height: 38px;
 }}
 QToolButton#route_nav_button {{
     background-color: transparent;
     color: {t.text_primary};
     border: 1px solid transparent;
     border-radius: 6px;
-    min-height: 25px;
-    padding: 5px 18px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 3px 18px;
     font-size: 14px;
 }}
 QToolButton#route_nav_button:hover {{

@@ -246,6 +246,53 @@ def test_startup_update_check_runs_when_enabled(qtbot, tmp_path, monkeypatch) ->
     qtbot.waitUntil(lambda: observed_sources == ["startup"], timeout=3000)
 
 
+def test_wizard_splitter_defaults_load_from_settings(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path, "wizard_splitter_defaults.ini")
+    settings.setValue(MainWindow.WIZARD_OUTER_LEFT_PERCENT_SETTING_KEY, 29)
+    settings.setValue(MainWindow.WIZARD_PACKAGE_LEFT_PERCENT_SETTING_KEY, 21)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert window.wizard_outer_left_percent == 29
+    assert window.wizard_package_left_percent == 21
+
+
+def test_wizard_splitter_ratio_persists_after_user_resize(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path, "wizard_splitter_persist.ini")
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window.tabs.setCurrentWidget(window.wizard_tab)
+    window.resize(1500, 950)
+    qtbot.wait(80)
+
+    window.wizard_content_splitter.setSizes([420, 1080])
+    window.wizard_package_splitter.setSizes([230, 850])
+    window._on_wizard_content_splitter_moved(0, 0)
+    window._on_wizard_package_splitter_moved(0, 0)
+
+    outer_saved = settings.value(MainWindow.WIZARD_OUTER_LEFT_PERCENT_SETTING_KEY, type=int)
+    package_saved = settings.value(MainWindow.WIZARD_PACKAGE_LEFT_PERCENT_SETTING_KEY, type=int)
+    assert 15 <= int(outer_saved) <= 60
+    assert 10 <= int(package_saved) <= 60
+
+    window.close()
+
+    restarted = MainWindow(app_settings=settings)
+    qtbot.addWidget(restarted)
+    restarted.show()
+    qtbot.waitUntil(lambda: restarted.preset_combo.count() > 0)
+
+    assert restarted.wizard_outer_left_percent == int(outer_saved)
+    assert restarted.wizard_package_left_percent == int(package_saved)
+
+
 def test_files_experiment_stylesheet_applies_in_dark_and_light(qtbot, tmp_path) -> None:
     settings = _temp_settings(tmp_path)
     settings.setValue(MainWindow.FILES_EXPERIMENT_SETTING_KEY, True)

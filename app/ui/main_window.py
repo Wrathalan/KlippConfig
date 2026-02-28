@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -291,37 +292,901 @@ class PrinterConnectionWindow(QMainWindow):
 
 
 class SettingsWindow(QDialog):
-    def __init__(self, *, check_updates_on_launch: bool, parent: QWidget | None = None) -> None:
+    PAGE_ORDER: tuple[tuple[str, str], ...] = (
+        ("general", "General"),
+        ("appearance", "Appearance"),
+        ("layout", "Layout"),
+        ("files", "Files"),
+        ("build", "Build"),
+        ("printer_defaults", "Printer Defaults"),
+        ("ssh_profiles", "SSH Profiles"),
+        ("updates", "Updates"),
+        ("experiments", "Experiments"),
+        ("advanced", "Advanced"),
+    )
+    UI_SCALE_OPTIONS: tuple[str, ...] = ("auto", "85", "90", "100", "110", "125", "150")
+    DEFAULTS: dict[str, Any] = {
+        "nav_visible": True,
+        "default_route": "home",
+        "theme_mode": "dark",
+        "ui_scale_mode": "auto",
+        "preview_collapsed": False,
+        "preview_pinned": False,
+        "wizard_outer_left_percent": 20,
+        "wizard_package_left_percent": 25,
+        "build_ratios_locked": True,
+        "build_core_percent": 20,
+        "build_config_percent": 20,
+        "build_preview_percent": 60,
+        "files_default_view_mode": "raw",
+        "ssh_save_on_success": True,
+        "ssh_default_remote_dir": "~/printer_data/config",
+        "ssh_default_remote_file": "~/printer_data/config/printer.cfg",
+        "ssh_default_backup_root": "~/klippconfig_backups",
+        "ssh_default_restart_command": "sudo systemctl restart klipper",
+        "ssh_default_backup_before_upload": True,
+        "ssh_default_restart_after_upload": False,
+        "manage_default_scan_depth": 5,
+        "manage_default_control_url": "",
+        "discovery_default_ip_range": "192.168.1.0/24",
+        "discovery_default_timeout_seconds": 0.35,
+        "discovery_default_max_hosts": 254,
+        "update_check_on_launch": True,
+        "files_experiment_enabled": False,
+        "settings_last_page": "general",
+        "auto_connect_enabled": True,
+        "default_connection_name": "",
+    }
+
+    def __init__(
+        self,
+        *,
+        initial_values: dict[str, Any],
+        profile_store: dict[str, dict[str, Any]],
+        initial_page: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(520, 220)
+        self.resize(1100, 760)
+        self.initial_values = dict(initial_values)
+        self.profile_store: dict[str, dict[str, Any]] = {
+            str(name): dict(payload)
+            for name, payload in profile_store.items()
+            if str(name).strip()
+        }
+        self.current_profile_name = ""
+        self.page_ids = [key for key, _label in self.PAGE_ORDER]
+        self.page_index_by_id: dict[str, int] = {}
+        self._loading_values = False
 
-        layout = QVBoxLayout(self)
-        general_group = QGroupBox("General", self)
-        general_layout = QVBoxLayout(general_group)
-        self.update_check_checkbox = QCheckBox(
-            "Check GitHub for updates when KlippConfig launches",
-            general_group,
-        )
-        self.update_check_checkbox.setChecked(check_updates_on_launch)
-        general_layout.addWidget(self.update_check_checkbox)
-        general_layout.addWidget(
-            QLabel("This check runs in the background and does not block the UI.", general_group)
-        )
-        layout.addWidget(general_group)
+        self.on_theme_preview = None
+        self.on_scale_preview = None
+        self.on_nav_preview = None
+        self.on_reset_layout = None
+        self.on_open_guided_setup = None
+        self.on_check_updates_now = None
 
-        action_row = QHBoxLayout()
-        self.check_now_button = QPushButton("Check Now", self)
-        action_row.addWidget(self.check_now_button)
-        action_row.addStretch(1)
-        self.save_button = QPushButton("Save", self)
+        root = QVBoxLayout(self)
+        body = QSplitter(Qt.Orientation.Horizontal, self)
+        body.setChildrenCollapsible(False)
+        body.setHandleWidth(8)
+        root.addWidget(body, 1)
+
+        self.category_list = QListWidget(body)
+        self.category_list.setMinimumWidth(220)
+        self.category_list.setMaximumWidth(280)
+        self.category_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.pages = QStackedWidget(body)
+        body.addWidget(self.category_list)
+        body.addWidget(self.pages)
+        body.setStretchFactor(0, 0)
+        body.setStretchFactor(1, 1)
+        body.setSizes([250, 820])
+
+        for page_id, label in self.PAGE_ORDER:
+            self.category_list.addItem(label)
+            builder = getattr(self, f"_build_{page_id}_page")
+            page = builder()
+            self.page_index_by_id[page_id] = self.pages.count()
+            self.pages.addWidget(page)
+
+        footer = QHBoxLayout()
+        self.reset_section_button = QPushButton("Reset Section", self)
+        self.reset_all_button = QPushButton("Reset All", self)
+        footer.addWidget(self.reset_section_button)
+        footer.addWidget(self.reset_all_button)
+        footer.addStretch(1)
+        self.apply_button = QPushButton("Apply", self)
+        self.ok_button = QPushButton("OK", self)
         self.cancel_button = QPushButton("Cancel", self)
-        action_row.addWidget(self.save_button)
-        action_row.addWidget(self.cancel_button)
-        layout.addLayout(action_row)
+        footer.addWidget(self.apply_button)
+        footer.addWidget(self.ok_button)
+        footer.addWidget(self.cancel_button)
+        root.addLayout(footer)
 
-        self.save_button.clicked.connect(self.accept)
+        self.ok_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
+        self.reset_section_button.clicked.connect(self._reset_current_section)
+        self.reset_all_button.clicked.connect(self._reset_all_sections)
+        self.category_list.currentRowChanged.connect(self._on_category_changed)
+
+        self.theme_mode_combo.currentTextChanged.connect(self._preview_theme_changed)
+        self.ui_scale_mode_combo.currentTextChanged.connect(self._preview_scale_changed)
+        self.nav_visible_checkbox.toggled.connect(self._preview_nav_changed)
+
+        self._load_into_controls(self.initial_values, replace_profiles=True)
+        self.set_current_page(initial_page or str(self.initial_values.get("settings_last_page") or "general"))
+
+    def _build_general_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("General", page)
+        form = QFormLayout(box)
+        self.nav_visible_checkbox = QCheckBox("Show top navigation bar", box)
+        form.addRow(self.nav_visible_checkbox)
+        self.default_route_combo = QComboBox(box)
+        self.default_route_combo.addItem("Home", "home")
+        self.default_route_combo.addItem("Build", "generate")
+        self.default_route_combo.addItem("Files", "files")
+        self.default_route_combo.addItem("Printers", "printers")
+        self.default_route_combo.addItem("Backups", "backups")
+        form.addRow("Default route", self.default_route_combo)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _build_appearance_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Appearance", page)
+        form = QFormLayout(box)
+        self.theme_mode_combo = QComboBox(box)
+        self.theme_mode_combo.addItems(["dark", "light"])
+        form.addRow("Theme", self.theme_mode_combo)
+        self.ui_scale_mode_combo = QComboBox(box)
+        self.ui_scale_mode_combo.addItems(["auto", "85", "90", "100", "110", "125", "150"])
+        form.addRow("UI scale", self.ui_scale_mode_combo)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _build_layout_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Layout", page)
+        form = QFormLayout(box)
+        self.preview_collapsed_checkbox = QCheckBox("Collapse persistent preview", box)
+        self.preview_pinned_checkbox = QCheckBox("Pin persistent preview", box)
+        form.addRow(self.preview_collapsed_checkbox)
+        form.addRow(self.preview_pinned_checkbox)
+        self.layout_metrics_label = QLabel("", box)
+        self.layout_metrics_label.setWordWrap(True)
+        form.addRow("Current ratios", self.layout_metrics_label)
+        layout.addWidget(box)
+        row = QHBoxLayout()
+        self.layout_reset_button = QPushButton("Reset Layout Now", page)
+        self.layout_reset_button.clicked.connect(self._request_layout_reset)
+        row.addWidget(self.layout_reset_button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        layout.addStretch(1)
+        return page
+
+    def _build_files_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Files Defaults", page)
+        form = QFormLayout(box)
+        self.files_default_view_combo = QComboBox(box)
+        self.files_default_view_combo.addItem("Raw", "raw")
+        self.files_default_view_combo.addItem("Form", "form")
+        form.addRow("Default view mode", self.files_default_view_combo)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _build_build_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Build Panel Ratios", page)
+        form = QFormLayout(box)
+        self.build_ratios_locked_checkbox = QCheckBox(
+            "Lock ratios to window size (dynamic)",
+            box,
+        )
+        form.addRow(self.build_ratios_locked_checkbox)
+        self.build_core_percent_spin = QSpinBox(box)
+        self.build_core_percent_spin.setRange(5, 90)
+        form.addRow("Core Hardware %", self.build_core_percent_spin)
+        self.build_config_percent_spin = QSpinBox(box)
+        self.build_config_percent_spin.setRange(5, 90)
+        form.addRow("Config %", self.build_config_percent_spin)
+        self.build_preview_percent_spin = QSpinBox(box)
+        self.build_preview_percent_spin.setRange(5, 90)
+        form.addRow("File Preview %", self.build_preview_percent_spin)
+        self.build_ratio_total_label = QLabel("", box)
+        self.build_ratio_total_label.setWordWrap(True)
+        form.addRow("Total", self.build_ratio_total_label)
+        self.build_ratios_locked_checkbox.toggled.connect(self._update_layout_metrics_label)
+        self.build_core_percent_spin.valueChanged.connect(self._update_build_ratio_total_label)
+        self.build_config_percent_spin.valueChanged.connect(self._update_build_ratio_total_label)
+        self.build_preview_percent_spin.valueChanged.connect(self._update_build_ratio_total_label)
+        self.build_core_percent_spin.valueChanged.connect(self._update_layout_metrics_label)
+        self.build_config_percent_spin.valueChanged.connect(self._update_layout_metrics_label)
+        self.build_preview_percent_spin.valueChanged.connect(self._update_layout_metrics_label)
+        reset_btn = QPushButton("Reset Build Ratios", box)
+        reset_btn.clicked.connect(self._reset_build_defaults)
+        form.addRow(reset_btn)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _build_printer_defaults_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+
+        deploy_box = QGroupBox("SSH / Deploy Defaults", page)
+        deploy_form = QFormLayout(deploy_box)
+        self.ssh_default_remote_dir_edit = QLineEdit(deploy_box)
+        deploy_form.addRow("Remote cfg dir", self.ssh_default_remote_dir_edit)
+        self.ssh_default_remote_file_edit = QLineEdit(deploy_box)
+        deploy_form.addRow("Remote file", self.ssh_default_remote_file_edit)
+        self.ssh_default_backup_root_edit = QLineEdit(deploy_box)
+        deploy_form.addRow("Backup root", self.ssh_default_backup_root_edit)
+        self.ssh_default_restart_command_edit = QLineEdit(deploy_box)
+        deploy_form.addRow("Restart command", self.ssh_default_restart_command_edit)
+        self.ssh_default_backup_before_upload_checkbox = QCheckBox(
+            "Backup before upload",
+            deploy_box,
+        )
+        deploy_form.addRow(self.ssh_default_backup_before_upload_checkbox)
+        self.ssh_default_restart_after_upload_checkbox = QCheckBox(
+            "Restart after upload",
+            deploy_box,
+        )
+        deploy_form.addRow(self.ssh_default_restart_after_upload_checkbox)
+        layout.addWidget(deploy_box)
+
+        manage_box = QGroupBox("Manage / Discovery Defaults", page)
+        manage_form = QFormLayout(manage_box)
+        self.manage_default_scan_depth_spin = QSpinBox(manage_box)
+        self.manage_default_scan_depth_spin.setRange(1, 10)
+        manage_form.addRow("File scan depth", self.manage_default_scan_depth_spin)
+        self.manage_default_control_url_edit = QLineEdit(manage_box)
+        self.manage_default_control_url_edit.setPlaceholderText("http://printer.local/")
+        manage_form.addRow("Control URL", self.manage_default_control_url_edit)
+        self.discovery_default_ip_range_edit = QLineEdit(manage_box)
+        manage_form.addRow("IP range", self.discovery_default_ip_range_edit)
+        self.discovery_default_timeout_spin = QDoubleSpinBox(manage_box)
+        self.discovery_default_timeout_spin.setRange(0.05, 5.0)
+        self.discovery_default_timeout_spin.setDecimals(2)
+        self.discovery_default_timeout_spin.setSingleStep(0.05)
+        manage_form.addRow("Timeout (s)", self.discovery_default_timeout_spin)
+        self.discovery_default_max_hosts_spin = QSpinBox(manage_box)
+        self.discovery_default_max_hosts_spin.setRange(1, 4096)
+        manage_form.addRow("Max hosts", self.discovery_default_max_hosts_spin)
+        layout.addWidget(manage_box)
+        layout.addStretch(1)
+        return page
+
+    def _build_ssh_profiles_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        split = QSplitter(Qt.Orientation.Horizontal, page)
+        split.setChildrenCollapsible(False)
+
+        left = QWidget(split)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        self.ssh_profile_list = QListWidget(left)
+        left_layout.addWidget(self.ssh_profile_list, 1)
+        list_actions = QHBoxLayout()
+        self.ssh_profile_new_button = QPushButton("New", left)
+        self.ssh_profile_delete_button = QPushButton("Delete", left)
+        list_actions.addWidget(self.ssh_profile_new_button)
+        list_actions.addWidget(self.ssh_profile_delete_button)
+        left_layout.addLayout(list_actions)
+
+        right = QWidget(split)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        profile_box = QGroupBox("Profile", right)
+        profile_form = QFormLayout(profile_box)
+        self.ssh_profile_name_edit = QLineEdit(profile_box)
+        profile_form.addRow("Name", self.ssh_profile_name_edit)
+        self.ssh_profile_host_edit = QLineEdit(profile_box)
+        profile_form.addRow("Host", self.ssh_profile_host_edit)
+        self.ssh_profile_port_spin = QSpinBox(profile_box)
+        self.ssh_profile_port_spin.setRange(1, 65535)
+        self.ssh_profile_port_spin.setValue(22)
+        profile_form.addRow("Port", self.ssh_profile_port_spin)
+        self.ssh_profile_username_edit = QLineEdit(profile_box)
+        profile_form.addRow("Username", self.ssh_profile_username_edit)
+        self.ssh_profile_password_edit = QLineEdit(profile_box)
+        self.ssh_profile_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        profile_form.addRow("Password", self.ssh_profile_password_edit)
+        self.ssh_profile_key_path_edit = QLineEdit(profile_box)
+        profile_form.addRow("Key path", self.ssh_profile_key_path_edit)
+        self.ssh_profile_remote_dir_edit = QLineEdit(profile_box)
+        profile_form.addRow("Remote dir", self.ssh_profile_remote_dir_edit)
+        self.ssh_profile_remote_file_edit = QLineEdit(profile_box)
+        profile_form.addRow("Remote file", self.ssh_profile_remote_file_edit)
+        self.ssh_profile_save_button = QPushButton("Save Profile", profile_box)
+        profile_form.addRow(self.ssh_profile_save_button)
+        right_layout.addWidget(profile_box)
+
+        prefs_box = QGroupBox("Profile Preferences", right)
+        prefs_form = QFormLayout(prefs_box)
+        self.ssh_default_profile_combo = QComboBox(prefs_box)
+        prefs_form.addRow("Default profile", self.ssh_default_profile_combo)
+        self.ssh_auto_connect_enabled_checkbox = QCheckBox("Auto-connect on launch", prefs_box)
+        prefs_form.addRow(self.ssh_auto_connect_enabled_checkbox)
+        self.ssh_save_on_success_settings_checkbox = QCheckBox(
+            "Save successful manual connections",
+            prefs_box,
+        )
+        prefs_form.addRow(self.ssh_save_on_success_settings_checkbox)
+        right_layout.addWidget(prefs_box)
+        right_layout.addStretch(1)
+
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setSizes([280, 680])
+        layout.addWidget(split, 1)
+
+        self.ssh_profile_list.currentTextChanged.connect(self._on_ssh_profile_selected)
+        self.ssh_profile_new_button.clicked.connect(self._new_ssh_profile)
+        self.ssh_profile_delete_button.clicked.connect(self._delete_selected_ssh_profile)
+        self.ssh_profile_save_button.clicked.connect(self._save_current_ssh_profile)
+        return page
+
+    def _build_updates_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Updates", page)
+        form = QFormLayout(box)
+        self.update_check_on_launch_checkbox = QCheckBox("Check for updates on launch", box)
+        form.addRow(self.update_check_on_launch_checkbox)
+        self.check_updates_now_button = QPushButton("Check now", box)
+        self.check_updates_now_button.clicked.connect(self._request_check_updates_now)
+        form.addRow(self.check_updates_now_button)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _build_experiments_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Experiments", page)
+        form = QFormLayout(box)
+        self.files_experiment_checkbox = QCheckBox("Enable Files UI v1", box)
+        form.addRow(self.files_experiment_checkbox)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    def _build_advanced_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Advanced", page)
+        box_layout = QVBoxLayout(box)
+        hint = QLabel(
+            "Advanced and developer options are centralized here.",
+            box,
+        )
+        hint.setWordWrap(True)
+        box_layout.addWidget(hint)
+        self.guided_setup_button = QPushButton("Guided Component Setup...", box)
+        self.guided_setup_button.clicked.connect(self._request_open_guided_setup)
+        box_layout.addWidget(self.guided_setup_button)
+        box_layout.addStretch(1)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    @staticmethod
+    def _coerce_bool(raw: Any, default: bool) -> bool:
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _coerce_int(raw: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _coerce_float(raw: Any, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(maximum, value))
+
+    def _normalize_profile_store(
+        self,
+        raw_store: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        cleaned: dict[str, dict[str, Any]] = {}
+        for raw_name, payload in raw_store.items():
+            name = str(raw_name).strip()
+            if not name or not isinstance(payload, dict):
+                continue
+            cleaned[name] = {
+                "host": str(payload.get("host") or "").strip(),
+                "port": self._coerce_int(payload.get("port"), 22, 1, 65535),
+                "username": str(payload.get("username") or "").strip(),
+                "password": str(payload.get("password") or ""),
+                "key_path": str(payload.get("key_path") or "").strip(),
+                "remote_dir": str(payload.get("remote_dir") or "~/printer_data/config").strip(),
+                "remote_file": str(
+                    payload.get("remote_file") or "~/printer_data/config/printer.cfg"
+                ).strip(),
+            }
+        return cleaned
+
+    def _normalize_values(self, values: dict[str, Any]) -> dict[str, Any]:
+        merged: dict[str, Any] = dict(self.DEFAULTS)
+        merged.update(values)
+        merged["nav_visible"] = self._coerce_bool(merged.get("nav_visible"), True)
+        route = str(merged.get("default_route") or "home").strip().lower()
+        merged["default_route"] = route if route in {"home", "generate", "files", "printers", "backups"} else "home"
+        theme = str(merged.get("theme_mode") or "dark").strip().lower()
+        merged["theme_mode"] = theme if theme in {"dark", "light"} else "dark"
+        scale = str(merged.get("ui_scale_mode") or "auto").strip().lower()
+        merged["ui_scale_mode"] = scale if scale in set(self.UI_SCALE_OPTIONS) else "auto"
+        merged["preview_collapsed"] = self._coerce_bool(merged.get("preview_collapsed"), False)
+        merged["preview_pinned"] = self._coerce_bool(merged.get("preview_pinned"), False)
+        merged["wizard_outer_left_percent"] = self._coerce_int(
+            merged.get("wizard_outer_left_percent"),
+            20,
+            10,
+            90,
+        )
+        merged["wizard_package_left_percent"] = self._coerce_int(
+            merged.get("wizard_package_left_percent"),
+            25,
+            10,
+            90,
+        )
+        merged["build_ratios_locked"] = self._coerce_bool(
+            merged.get("build_ratios_locked"),
+            True,
+        )
+        core = self._coerce_int(merged.get("build_core_percent"), 20, 5, 90)
+        config = self._coerce_int(merged.get("build_config_percent"), 20, 5, 90)
+        preview = self._coerce_int(merged.get("build_preview_percent"), 60, 5, 90)
+        total = core + config + preview
+        if total <= 0:
+            core, config, preview = 20, 20, 60
+            total = 100
+        if total != 100:
+            core = int(round((core * 100) / total))
+            config = int(round((config * 100) / total))
+            preview = max(5, 100 - core - config)
+            if core + config + preview != 100:
+                preview = 100 - core - config
+            if preview < 5:
+                deficit = 5 - preview
+                preview = 5
+                if config > core:
+                    config = max(5, config - deficit)
+                else:
+                    core = max(5, core - deficit)
+                if core + config + preview != 100:
+                    preview = 100 - core - config
+        merged["build_core_percent"] = core
+        merged["build_config_percent"] = config
+        merged["build_preview_percent"] = preview
+        view_mode = str(merged.get("files_default_view_mode") or "raw").strip().lower()
+        merged["files_default_view_mode"] = view_mode if view_mode in {"raw", "form"} else "raw"
+        merged["ssh_save_on_success"] = self._coerce_bool(
+            merged.get("ssh_save_on_success"),
+            True,
+        )
+        merged["ssh_default_remote_dir"] = str(
+            merged.get("ssh_default_remote_dir") or "~/printer_data/config"
+        ).strip()
+        merged["ssh_default_remote_file"] = str(
+            merged.get("ssh_default_remote_file") or "~/printer_data/config/printer.cfg"
+        ).strip()
+        merged["ssh_default_backup_root"] = str(
+            merged.get("ssh_default_backup_root") or "~/klippconfig_backups"
+        ).strip()
+        merged["ssh_default_restart_command"] = str(
+            merged.get("ssh_default_restart_command") or "sudo systemctl restart klipper"
+        ).strip()
+        merged["ssh_default_backup_before_upload"] = self._coerce_bool(
+            merged.get("ssh_default_backup_before_upload"),
+            True,
+        )
+        merged["ssh_default_restart_after_upload"] = self._coerce_bool(
+            merged.get("ssh_default_restart_after_upload"),
+            False,
+        )
+        merged["manage_default_scan_depth"] = self._coerce_int(
+            merged.get("manage_default_scan_depth"),
+            5,
+            1,
+            10,
+        )
+        merged["manage_default_control_url"] = str(merged.get("manage_default_control_url") or "").strip()
+        merged["discovery_default_ip_range"] = str(
+            merged.get("discovery_default_ip_range") or "192.168.1.0/24"
+        ).strip()
+        merged["discovery_default_timeout_seconds"] = self._coerce_float(
+            merged.get("discovery_default_timeout_seconds"),
+            0.35,
+            0.05,
+            5.0,
+        )
+        merged["discovery_default_max_hosts"] = self._coerce_int(
+            merged.get("discovery_default_max_hosts"),
+            254,
+            1,
+            4096,
+        )
+        merged["update_check_on_launch"] = self._coerce_bool(
+            merged.get("update_check_on_launch"),
+            True,
+        )
+        merged["files_experiment_enabled"] = self._coerce_bool(
+            merged.get("files_experiment_enabled"),
+            False,
+        )
+        merged["settings_last_page"] = str(merged.get("settings_last_page") or "general").strip().lower()
+        merged["auto_connect_enabled"] = self._coerce_bool(
+            merged.get("auto_connect_enabled"),
+            True,
+        )
+        merged["default_connection_name"] = str(merged.get("default_connection_name") or "").strip()
+        return merged
+
+    def _on_category_changed(self, row: int) -> None:
+        if row < 0 or row >= self.pages.count():
+            return
+        self.pages.setCurrentIndex(row)
+
+    def set_current_page(self, page_id: str | None) -> None:
+        target = str(page_id or "general").strip().lower()
+        index = self.page_index_by_id.get(target, 0)
+        self.category_list.setCurrentRow(index)
+
+    def current_page_id(self) -> str:
+        row = self.category_list.currentRow()
+        if row < 0 or row >= len(self.page_ids):
+            return "general"
+        return self.page_ids[row]
+
+    def _request_layout_reset(self) -> None:
+        if callable(self.on_reset_layout):
+            self.on_reset_layout()
+
+    def _request_open_guided_setup(self) -> None:
+        if callable(self.on_open_guided_setup):
+            self.on_open_guided_setup()
+
+    def _request_check_updates_now(self) -> None:
+        if callable(self.on_check_updates_now):
+            self.on_check_updates_now()
+
+    def _preview_theme_changed(self, value: str) -> None:
+        if self._loading_values:
+            return
+        if callable(self.on_theme_preview):
+            self.on_theme_preview(str(value).strip().lower())
+
+    def _preview_scale_changed(self, value: str) -> None:
+        if self._loading_values:
+            return
+        if callable(self.on_scale_preview):
+            self.on_scale_preview(str(value).strip().lower())
+
+    def _preview_nav_changed(self, checked: bool) -> None:
+        if self._loading_values:
+            return
+        if callable(self.on_nav_preview):
+            self.on_nav_preview(bool(checked))
+
+    def _reset_build_defaults(self) -> None:
+        self.build_ratios_locked_checkbox.setChecked(True)
+        self.build_core_percent_spin.setValue(20)
+        self.build_config_percent_spin.setValue(20)
+        self.build_preview_percent_spin.setValue(60)
+        self._update_build_ratio_total_label()
+        self._update_layout_metrics_label()
+
+    def _reset_current_section(self) -> None:
+        page_id = self.current_page_id()
+        defaults = self._normalize_values({})
+        current = self.collect_values()
+        if page_id == "general":
+            current["nav_visible"] = defaults["nav_visible"]
+            current["default_route"] = defaults["default_route"]
+        elif page_id == "appearance":
+            current["theme_mode"] = defaults["theme_mode"]
+            current["ui_scale_mode"] = defaults["ui_scale_mode"]
+        elif page_id == "layout":
+            current["preview_collapsed"] = defaults["preview_collapsed"]
+            current["preview_pinned"] = defaults["preview_pinned"]
+        elif page_id == "files":
+            current["files_default_view_mode"] = defaults["files_default_view_mode"]
+        elif page_id == "build":
+            current["wizard_outer_left_percent"] = defaults["wizard_outer_left_percent"]
+            current["wizard_package_left_percent"] = defaults["wizard_package_left_percent"]
+            current["build_ratios_locked"] = defaults["build_ratios_locked"]
+            current["build_core_percent"] = defaults["build_core_percent"]
+            current["build_config_percent"] = defaults["build_config_percent"]
+            current["build_preview_percent"] = defaults["build_preview_percent"]
+        elif page_id == "printer_defaults":
+            current["ssh_default_remote_dir"] = defaults["ssh_default_remote_dir"]
+            current["ssh_default_remote_file"] = defaults["ssh_default_remote_file"]
+            current["ssh_default_backup_root"] = defaults["ssh_default_backup_root"]
+            current["ssh_default_restart_command"] = defaults["ssh_default_restart_command"]
+            current["ssh_default_backup_before_upload"] = defaults[
+                "ssh_default_backup_before_upload"
+            ]
+            current["ssh_default_restart_after_upload"] = defaults[
+                "ssh_default_restart_after_upload"
+            ]
+            current["manage_default_scan_depth"] = defaults["manage_default_scan_depth"]
+            current["manage_default_control_url"] = defaults["manage_default_control_url"]
+            current["discovery_default_ip_range"] = defaults["discovery_default_ip_range"]
+            current["discovery_default_timeout_seconds"] = defaults[
+                "discovery_default_timeout_seconds"
+            ]
+            current["discovery_default_max_hosts"] = defaults["discovery_default_max_hosts"]
+        elif page_id == "ssh_profiles":
+            current["auto_connect_enabled"] = defaults["auto_connect_enabled"]
+            current["ssh_save_on_success"] = defaults["ssh_save_on_success"]
+            current["default_connection_name"] = defaults["default_connection_name"]
+            current["profile_store"] = {}
+        elif page_id == "updates":
+            current["update_check_on_launch"] = defaults["update_check_on_launch"]
+        elif page_id == "experiments":
+            current["files_experiment_enabled"] = defaults["files_experiment_enabled"]
+        self._load_into_controls(current, replace_profiles=(page_id == "ssh_profiles"))
+        self.set_current_page(page_id)
+
+    def _reset_all_sections(self) -> None:
+        defaults = self._normalize_values({})
+        defaults["profile_store"] = {}
+        self._load_into_controls(defaults, replace_profiles=True)
+
+    def _refresh_profile_views(self, *, select_name: str | None = None) -> None:
+        names = sorted(self.profile_store.keys(), key=str.casefold)
+        self.ssh_profile_list.blockSignals(True)
+        self.ssh_profile_list.clear()
+        self.ssh_profile_list.addItems(names)
+        self.ssh_profile_list.blockSignals(False)
+
+        current_default = self.ssh_default_profile_combo.currentData()
+        self.ssh_default_profile_combo.blockSignals(True)
+        self.ssh_default_profile_combo.clear()
+        self.ssh_default_profile_combo.addItem("(none)", "")
+        for name in names:
+            self.ssh_default_profile_combo.addItem(name, name)
+        self.ssh_default_profile_combo.blockSignals(False)
+
+        target = str(select_name or self.current_profile_name or "").strip()
+        if not target and isinstance(current_default, str):
+            target = current_default.strip()
+        if target and target in names:
+            for row in range(self.ssh_profile_list.count()):
+                item = self.ssh_profile_list.item(row)
+                if item is not None and item.text() == target:
+                    self.ssh_profile_list.setCurrentRow(row)
+                    break
+        elif self.ssh_profile_list.count() > 0:
+            self.ssh_profile_list.setCurrentRow(0)
+        else:
+            self.current_profile_name = ""
+            self._clear_profile_editor()
+
+    def _clear_profile_editor(self) -> None:
+        self.ssh_profile_name_edit.clear()
+        self.ssh_profile_host_edit.clear()
+        self.ssh_profile_port_spin.setValue(22)
+        self.ssh_profile_username_edit.clear()
+        self.ssh_profile_password_edit.clear()
+        self.ssh_profile_key_path_edit.clear()
+        self.ssh_profile_remote_dir_edit.setText("~/printer_data/config")
+        self.ssh_profile_remote_file_edit.setText("~/printer_data/config/printer.cfg")
+
+    def _on_ssh_profile_selected(self, profile_name: str) -> None:
+        selected = profile_name.strip()
+        if not selected:
+            self.current_profile_name = ""
+            self._clear_profile_editor()
+            return
+        profile = self.profile_store.get(selected)
+        if profile is None:
+            return
+        self.current_profile_name = selected
+        self.ssh_profile_name_edit.setText(selected)
+        self.ssh_profile_host_edit.setText(str(profile.get("host") or ""))
+        self.ssh_profile_port_spin.setValue(self._coerce_int(profile.get("port"), 22, 1, 65535))
+        self.ssh_profile_username_edit.setText(str(profile.get("username") or ""))
+        self.ssh_profile_password_edit.setText(str(profile.get("password") or ""))
+        self.ssh_profile_key_path_edit.setText(str(profile.get("key_path") or ""))
+        self.ssh_profile_remote_dir_edit.setText(
+            str(profile.get("remote_dir") or "~/printer_data/config")
+        )
+        self.ssh_profile_remote_file_edit.setText(
+            str(profile.get("remote_file") or "~/printer_data/config/printer.cfg")
+        )
+
+    def _new_ssh_profile(self) -> None:
+        self.current_profile_name = ""
+        self._clear_profile_editor()
+        self.ssh_profile_name_edit.setFocus()
+
+    def _save_current_ssh_profile(self) -> None:
+        name = self.ssh_profile_name_edit.text().strip()
+        host = self.ssh_profile_host_edit.text().strip()
+        username = self.ssh_profile_username_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "SSH Profiles", "Profile name is required.")
+            return
+        if not host or not username:
+            QMessageBox.warning(self, "SSH Profiles", "Host and username are required.")
+            return
+        self.profile_store[name] = {
+            "host": host,
+            "port": int(self.ssh_profile_port_spin.value()),
+            "username": username,
+            "password": self.ssh_profile_password_edit.text() or None,
+            "key_path": self.ssh_profile_key_path_edit.text().strip() or None,
+            "remote_dir": self.ssh_profile_remote_dir_edit.text().strip() or "~/printer_data/config",
+            "remote_file": self.ssh_profile_remote_file_edit.text().strip()
+            or "~/printer_data/config/printer.cfg",
+        }
+        self.current_profile_name = name
+        self._refresh_profile_views(select_name=name)
+        if not self.ssh_default_profile_combo.currentData():
+            index = self.ssh_default_profile_combo.findData(name)
+            if index >= 0:
+                self.ssh_default_profile_combo.setCurrentIndex(index)
+
+    def _delete_selected_ssh_profile(self) -> None:
+        item = self.ssh_profile_list.currentItem()
+        name = item.text().strip() if item is not None else ""
+        if not name:
+            return
+        answer = QMessageBox.question(self, "Delete SSH Profile", f"Delete profile '{name}'?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.profile_store.pop(name, None)
+        if str(self.ssh_default_profile_combo.currentData() or "").strip() == name:
+            self.ssh_default_profile_combo.setCurrentIndex(0)
+        self.current_profile_name = ""
+        self._refresh_profile_views()
+
+    def _update_layout_metrics_label(self) -> None:
+        lock_text = "locked" if self.build_ratios_locked_checkbox.isChecked() else "unlocked"
+        self.layout_metrics_label.setText(
+            (
+                "Build panel ratios: "
+                f"{self.build_core_percent_spin.value()}% / "
+                f"{self.build_config_percent_spin.value()}% / "
+                f"{self.build_preview_percent_spin.value()}% "
+                f"({lock_text})"
+            )
+        )
+
+    def _update_build_ratio_total_label(self) -> None:
+        total = (
+            self.build_core_percent_spin.value()
+            + self.build_config_percent_spin.value()
+            + self.build_preview_percent_spin.value()
+        )
+        note = "normalized on Apply/OK"
+        self.build_ratio_total_label.setText(f"{total}% ({note})")
+
+    def _load_into_controls(self, values: dict[str, Any], *, replace_profiles: bool) -> None:
+        merged = self._normalize_values(values)
+        self._loading_values = True
+        try:
+            self.nav_visible_checkbox.setChecked(bool(merged["nav_visible"]))
+            route_index = self.default_route_combo.findData(merged["default_route"])
+            self.default_route_combo.setCurrentIndex(max(0, route_index))
+            self.theme_mode_combo.setCurrentText(str(merged["theme_mode"]))
+            self.ui_scale_mode_combo.setCurrentText(str(merged["ui_scale_mode"]))
+            self.preview_collapsed_checkbox.setChecked(bool(merged["preview_collapsed"]))
+            self.preview_pinned_checkbox.setChecked(bool(merged["preview_pinned"]))
+            self.files_default_view_combo.setCurrentIndex(
+                1 if str(merged["files_default_view_mode"]) == "form" else 0
+            )
+            self.build_ratios_locked_checkbox.setChecked(bool(merged["build_ratios_locked"]))
+            self.build_core_percent_spin.setValue(int(merged["build_core_percent"]))
+            self.build_config_percent_spin.setValue(int(merged["build_config_percent"]))
+            self.build_preview_percent_spin.setValue(int(merged["build_preview_percent"]))
+            self.ssh_default_remote_dir_edit.setText(str(merged["ssh_default_remote_dir"]))
+            self.ssh_default_remote_file_edit.setText(str(merged["ssh_default_remote_file"]))
+            self.ssh_default_backup_root_edit.setText(str(merged["ssh_default_backup_root"]))
+            self.ssh_default_restart_command_edit.setText(str(merged["ssh_default_restart_command"]))
+            self.ssh_default_backup_before_upload_checkbox.setChecked(
+                bool(merged["ssh_default_backup_before_upload"])
+            )
+            self.ssh_default_restart_after_upload_checkbox.setChecked(
+                bool(merged["ssh_default_restart_after_upload"])
+            )
+            self.manage_default_scan_depth_spin.setValue(int(merged["manage_default_scan_depth"]))
+            self.manage_default_control_url_edit.setText(str(merged["manage_default_control_url"]))
+            self.discovery_default_ip_range_edit.setText(str(merged["discovery_default_ip_range"]))
+            self.discovery_default_timeout_spin.setValue(float(merged["discovery_default_timeout_seconds"]))
+            self.discovery_default_max_hosts_spin.setValue(int(merged["discovery_default_max_hosts"]))
+            self.update_check_on_launch_checkbox.setChecked(bool(merged["update_check_on_launch"]))
+            self.files_experiment_checkbox.setChecked(bool(merged["files_experiment_enabled"]))
+            self.ssh_auto_connect_enabled_checkbox.setChecked(bool(merged["auto_connect_enabled"]))
+            self.ssh_save_on_success_settings_checkbox.setChecked(bool(merged["ssh_save_on_success"]))
+            if replace_profiles:
+                profile_store = values.get("profile_store") if isinstance(values, dict) else None
+                if isinstance(profile_store, dict):
+                    self.profile_store = self._normalize_profile_store(profile_store)
+                self._refresh_profile_views()
+            default_name = str(merged.get("default_connection_name") or "").strip()
+            default_index = self.ssh_default_profile_combo.findData(default_name)
+            self.ssh_default_profile_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+            self._update_build_ratio_total_label()
+            self._update_layout_metrics_label()
+        finally:
+            self._loading_values = False
+
+    def collect_values(self) -> dict[str, Any]:
+        core = int(self.build_core_percent_spin.value())
+        config = int(self.build_config_percent_spin.value())
+        preview = int(self.build_preview_percent_spin.value())
+        composite = max(1, 100 - core)
+        package_left = int(round((config * 100) / composite))
+        package_left = max(10, min(90, package_left))
+
+        values = self._normalize_values(
+            {
+                "nav_visible": self.nav_visible_checkbox.isChecked(),
+                "default_route": self.default_route_combo.currentData(),
+                "theme_mode": self.theme_mode_combo.currentText().strip().lower(),
+                "ui_scale_mode": self.ui_scale_mode_combo.currentText().strip().lower(),
+                "preview_collapsed": self.preview_collapsed_checkbox.isChecked(),
+                "preview_pinned": self.preview_pinned_checkbox.isChecked(),
+                "wizard_outer_left_percent": core,
+                "wizard_package_left_percent": package_left,
+                "build_ratios_locked": self.build_ratios_locked_checkbox.isChecked(),
+                "build_core_percent": core,
+                "build_config_percent": config,
+                "build_preview_percent": preview,
+                "files_default_view_mode": self.files_default_view_combo.currentData(),
+                "ssh_save_on_success": self.ssh_save_on_success_settings_checkbox.isChecked(),
+                "ssh_default_remote_dir": self.ssh_default_remote_dir_edit.text().strip(),
+                "ssh_default_remote_file": self.ssh_default_remote_file_edit.text().strip(),
+                "ssh_default_backup_root": self.ssh_default_backup_root_edit.text().strip(),
+                "ssh_default_restart_command": self.ssh_default_restart_command_edit.text().strip(),
+                "ssh_default_backup_before_upload": self.ssh_default_backup_before_upload_checkbox.isChecked(),
+                "ssh_default_restart_after_upload": self.ssh_default_restart_after_upload_checkbox.isChecked(),
+                "manage_default_scan_depth": self.manage_default_scan_depth_spin.value(),
+                "manage_default_control_url": self.manage_default_control_url_edit.text().strip(),
+                "discovery_default_ip_range": self.discovery_default_ip_range_edit.text().strip(),
+                "discovery_default_timeout_seconds": self.discovery_default_timeout_spin.value(),
+                "discovery_default_max_hosts": self.discovery_default_max_hosts_spin.value(),
+                "update_check_on_launch": self.update_check_on_launch_checkbox.isChecked(),
+                "files_experiment_enabled": self.files_experiment_checkbox.isChecked(),
+                "settings_last_page": self.current_page_id(),
+                "auto_connect_enabled": self.ssh_auto_connect_enabled_checkbox.isChecked(),
+                "default_connection_name": str(self.ssh_default_profile_combo.currentData() or "").strip(),
+            }
+        )
+        values["profile_store"] = self._normalize_profile_store(self.profile_store)
+        return values
 
 
 class MainWindow(QMainWindow):
@@ -344,6 +1209,29 @@ class MainWindow(QMainWindow):
     )
     FILES_EXPERIMENT_SETTING_KEY = "ui/experiments/files_material_v1_enabled"
     UPDATE_CHECK_ON_LAUNCH_SETTING_KEY = "ui/update/check_on_launch_enabled"
+    NAV_VISIBLE_SETTING_KEY = "ui/nav/visible"
+    FILES_DEFAULT_VIEW_MODE_SETTING_KEY = "ui/files/default_view_mode"
+    SSH_SAVE_ON_SUCCESS_SETTING_KEY = "ui/ssh/save_on_success"
+    SSH_DEFAULT_REMOTE_DIR_SETTING_KEY = "ui/ssh/default_remote_dir"
+    SSH_DEFAULT_REMOTE_FILE_SETTING_KEY = "ui/ssh/default_remote_file"
+    SSH_DEFAULT_BACKUP_ROOT_SETTING_KEY = "ui/ssh/default_backup_root"
+    SSH_DEFAULT_RESTART_COMMAND_SETTING_KEY = "ui/ssh/default_restart_command"
+    SSH_DEFAULT_BACKUP_BEFORE_UPLOAD_SETTING_KEY = "ui/ssh/default_backup_before_upload"
+    SSH_DEFAULT_RESTART_AFTER_UPLOAD_SETTING_KEY = "ui/ssh/default_restart_after_upload"
+    MANAGE_DEFAULT_SCAN_DEPTH_SETTING_KEY = "ui/manage/default_scan_depth"
+    MANAGE_DEFAULT_CONTROL_URL_SETTING_KEY = "ui/manage/default_control_url"
+    DISCOVERY_DEFAULT_IP_RANGE_SETTING_KEY = "ui/discovery/default_ip_range"
+    DISCOVERY_DEFAULT_TIMEOUT_SETTING_KEY = "ui/discovery/default_timeout_seconds"
+    DISCOVERY_DEFAULT_MAX_HOSTS_SETTING_KEY = "ui/discovery/default_max_hosts"
+    SETTINGS_LAST_PAGE_SETTING_KEY = "ui/settings/last_page"
+    BUILD_PANEL_RATIOS_LOCKED_SETTING_KEY = "ui/build/ratios_locked"
+    BUILD_PANEL_CORE_PERCENT_SETTING_KEY = "ui/build/core_percent"
+    BUILD_PANEL_CONFIG_PERCENT_SETTING_KEY = "ui/build/config_percent"
+    BUILD_PANEL_PREVIEW_PERCENT_SETTING_KEY = "ui/build/preview_percent"
+    WIZARD_OUTER_LEFT_PERCENT_SETTING_KEY = "ui/wizard/outer_left_percent"
+    WIZARD_PACKAGE_LEFT_PERCENT_SETTING_KEY = "ui/wizard/package_left_percent"
+    WIZARD_OUTER_LEFT_PERCENT_DEFAULT = 20
+    WIZARD_PACKAGE_LEFT_PERCENT_DEFAULT = 25
     GITHUB_REPO_OWNER = "Wrathalan"
     GITHUB_REPO_NAME = "KlippConfig"
     # Legacy keys kept only for cleanup migration from older app builds.
@@ -503,20 +1391,42 @@ QGroupBox::title {
         self.preview_collapsed = self._settings_bool("ui/persistent_preview_collapsed", False)
         self.preview_snippet_max_lines = 400
         self.preview_panel_width = self._settings_int("ui/persistent_preview_width", 420)
+        self.wizard_outer_left_percent = self._settings_percent(
+            self.WIZARD_OUTER_LEFT_PERCENT_SETTING_KEY,
+            self.WIZARD_OUTER_LEFT_PERCENT_DEFAULT,
+        )
+        self.wizard_package_left_percent = self._settings_percent(
+            self.WIZARD_PACKAGE_LEFT_PERCENT_SETTING_KEY,
+            self.WIZARD_PACKAGE_LEFT_PERCENT_DEFAULT,
+        )
         self.preview_source_cache: dict[str, dict[str, str]] = {}
         self.preview_validation_cache: dict[str, tuple[int, int]] = {}
         self.preview_connected_printer_name: str | None = None
         self.preview_connected_host: str | None = None
         self.about_window: QMainWindow | None = None
         self.current_project_path: str | None = None
-        raw_theme = str(self.app_settings.value("ui/theme_mode", "dark") or "dark").strip().lower()
-        self.theme_mode = raw_theme if raw_theme in {"dark", "light"} else "dark"
-        self.files_experiment_enabled = self._settings_bool(
-            self.FILES_EXPERIMENT_SETTING_KEY,
-            False,
+        self.preferences_defaults = self._load_preferences_defaults()
+        self.theme_mode = str(self.preferences_defaults.get("theme_mode") or "dark")
+        self.files_experiment_enabled = bool(
+            self.preferences_defaults.get("files_experiment_enabled", False)
         )
+        self.update_check_on_launch_enabled = bool(
+            self.preferences_defaults.get("update_check_on_launch", True)
+        )
+        self.build_ratios_locked = bool(self.preferences_defaults.get("build_ratios_locked", True))
+        self.build_core_percent = int(self.preferences_defaults.get("build_core_percent", 20))
+        self.build_config_percent = int(self.preferences_defaults.get("build_config_percent", 20))
+        self.build_preview_percent = int(self.preferences_defaults.get("build_preview_percent", 60))
+        self.wizard_outer_left_percent = int(
+            self.preferences_defaults.get("wizard_outer_left_percent", self.wizard_outer_left_percent)
+        )
+        self.wizard_package_left_percent = int(
+            self.preferences_defaults.get("wizard_package_left_percent", self.wizard_package_left_percent)
+        )
+        self._applying_locked_build_ratios = False
 
         self._build_ui()
+        self._sync_runtime_controls_from_settings()
         self.app_state_store.update_ui(
             active_route="home",
             legacy_visible=True,
@@ -524,6 +1434,12 @@ QGroupBox::title {
         )
         self._load_presets()
         self._render_and_validate()
+        default_route = str(self.preferences_defaults.get("default_route") or "home").strip().lower()
+        if default_route in {"generate", "files", "printers", "backups"}:
+            QTimer.singleShot(
+                0,
+                lambda route_key=default_route: self._on_shell_route_selected(route_key),
+            )
 
     def _settings_bool(self, key: str, default: bool) -> bool:
         raw = self.app_settings.value(key, default)
@@ -539,6 +1455,603 @@ QGroupBox::title {
         except (TypeError, ValueError):
             return default
         return max(60, value)
+
+    def _settings_percent(self, key: str, default: int) -> int:
+        raw = self.app_settings.value(key, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(10, min(90, value))
+
+    def _load_preferences_defaults(self) -> dict[str, Any]:
+        def _read_int(key: str, default: int) -> int:
+            raw = self.app_settings.value(key, default)
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        def _read_float(key: str, default: float) -> float:
+            raw = self.app_settings.value(key, default)
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
+        values: dict[str, Any] = {
+            "nav_visible": self._settings_bool(self.NAV_VISIBLE_SETTING_KEY, True),
+            "default_route": str(self.app_settings.value("ui/default_route", "home") or "home")
+            .strip()
+            .lower(),
+            "theme_mode": str(self.app_settings.value("ui/theme_mode", "dark") or "dark")
+            .strip()
+            .lower(),
+            "ui_scale_mode": str(self.ui_scaling_service.load_mode() or "auto").strip().lower(),
+            "preview_collapsed": bool(self.preview_collapsed),
+            "preview_pinned": bool(self.preview_pinned),
+            "wizard_outer_left_percent": int(self.wizard_outer_left_percent),
+            "wizard_package_left_percent": int(self.wizard_package_left_percent),
+            "build_ratios_locked": self._settings_bool(
+                self.BUILD_PANEL_RATIOS_LOCKED_SETTING_KEY,
+                True,
+            ),
+            "build_core_percent": _read_int(
+                self.BUILD_PANEL_CORE_PERCENT_SETTING_KEY,
+                20,
+            ),
+            "build_config_percent": _read_int(
+                self.BUILD_PANEL_CONFIG_PERCENT_SETTING_KEY,
+                20,
+            ),
+            "build_preview_percent": _read_int(
+                self.BUILD_PANEL_PREVIEW_PERCENT_SETTING_KEY,
+                60,
+            ),
+            "files_default_view_mode": str(
+                self.app_settings.value(self.FILES_DEFAULT_VIEW_MODE_SETTING_KEY, "raw") or "raw"
+            )
+            .strip()
+            .lower(),
+            "ssh_save_on_success": self._settings_bool(
+                self.SSH_SAVE_ON_SUCCESS_SETTING_KEY,
+                True,
+            ),
+            "ssh_default_remote_dir": str(
+                self.app_settings.value(
+                    self.SSH_DEFAULT_REMOTE_DIR_SETTING_KEY,
+                    "~/printer_data/config",
+                )
+                or "~/printer_data/config"
+            ).strip(),
+            "ssh_default_remote_file": str(
+                self.app_settings.value(
+                    self.SSH_DEFAULT_REMOTE_FILE_SETTING_KEY,
+                    "~/printer_data/config/printer.cfg",
+                )
+                or "~/printer_data/config/printer.cfg"
+            ).strip(),
+            "ssh_default_backup_root": str(
+                self.app_settings.value(
+                    self.SSH_DEFAULT_BACKUP_ROOT_SETTING_KEY,
+                    "~/klippconfig_backups",
+                )
+                or "~/klippconfig_backups"
+            ).strip(),
+            "ssh_default_restart_command": str(
+                self.app_settings.value(
+                    self.SSH_DEFAULT_RESTART_COMMAND_SETTING_KEY,
+                    "sudo systemctl restart klipper",
+                )
+                or "sudo systemctl restart klipper"
+            ).strip(),
+            "ssh_default_backup_before_upload": self._settings_bool(
+                self.SSH_DEFAULT_BACKUP_BEFORE_UPLOAD_SETTING_KEY,
+                True,
+            ),
+            "ssh_default_restart_after_upload": self._settings_bool(
+                self.SSH_DEFAULT_RESTART_AFTER_UPLOAD_SETTING_KEY,
+                False,
+            ),
+            "manage_default_scan_depth": _read_int(self.MANAGE_DEFAULT_SCAN_DEPTH_SETTING_KEY, 5),
+            "manage_default_control_url": str(
+                self.app_settings.value(self.MANAGE_DEFAULT_CONTROL_URL_SETTING_KEY, "") or ""
+            ).strip(),
+            "discovery_default_ip_range": str(
+                self.app_settings.value(
+                    self.DISCOVERY_DEFAULT_IP_RANGE_SETTING_KEY,
+                    "192.168.1.0/24",
+                )
+                or "192.168.1.0/24"
+            ).strip(),
+            "discovery_default_timeout_seconds": _read_float(
+                self.DISCOVERY_DEFAULT_TIMEOUT_SETTING_KEY,
+                0.35,
+            ),
+            "discovery_default_max_hosts": _read_int(
+                self.DISCOVERY_DEFAULT_MAX_HOSTS_SETTING_KEY,
+                254,
+            ),
+            "update_check_on_launch": self._settings_bool(
+                self.UPDATE_CHECK_ON_LAUNCH_SETTING_KEY,
+                True,
+            ),
+            "files_experiment_enabled": self._settings_bool(
+                self.FILES_EXPERIMENT_SETTING_KEY,
+                False,
+            ),
+            "settings_last_page": str(
+                self.app_settings.value(self.SETTINGS_LAST_PAGE_SETTING_KEY, "general") or "general"
+            )
+            .strip()
+            .lower(),
+            "auto_connect_enabled": bool(self.auto_connect_enabled),
+            "default_connection_name": str(self.default_ssh_connection_name or "").strip(),
+        }
+        has_new_build_ratio_keys = (
+            self.app_settings.contains(self.BUILD_PANEL_CORE_PERCENT_SETTING_KEY)
+            and self.app_settings.contains(self.BUILD_PANEL_CONFIG_PERCENT_SETTING_KEY)
+            and self.app_settings.contains(self.BUILD_PANEL_PREVIEW_PERCENT_SETTING_KEY)
+        )
+        if not has_new_build_ratio_keys:
+            core_from_wizard = max(10, min(90, int(values["wizard_outer_left_percent"])))
+            right_space = max(1, 100 - core_from_wizard)
+            config_from_wizard = int(
+                round((right_space * int(values["wizard_package_left_percent"])) / 100)
+            )
+            preview_from_wizard = max(5, 100 - core_from_wizard - config_from_wizard)
+            values["build_core_percent"] = core_from_wizard
+            values["build_config_percent"] = config_from_wizard
+            values["build_preview_percent"] = preview_from_wizard
+        if values["theme_mode"] not in {"dark", "light"}:
+            values["theme_mode"] = "dark"
+        if values["ui_scale_mode"] not in {"auto", "85", "90", "100", "110", "125", "150"}:
+            values["ui_scale_mode"] = "auto"
+        if values["files_default_view_mode"] not in {"raw", "form"}:
+            values["files_default_view_mode"] = "raw"
+        values["manage_default_scan_depth"] = max(
+            1,
+            min(10, int(values.get("manage_default_scan_depth", 5) or 5)),
+        )
+        values["discovery_default_timeout_seconds"] = max(
+            0.05,
+            min(5.0, float(values.get("discovery_default_timeout_seconds", 0.35) or 0.35)),
+        )
+        values["discovery_default_max_hosts"] = max(
+            1,
+            min(4096, int(values.get("discovery_default_max_hosts", 254) or 254)),
+        )
+        values["build_ratios_locked"] = bool(values.get("build_ratios_locked", True))
+        core = max(5, min(90, int(values.get("build_core_percent", 20) or 20)))
+        config = max(5, min(90, int(values.get("build_config_percent", 20) or 20)))
+        preview = max(5, min(90, int(values.get("build_preview_percent", 60) or 60)))
+        total = core + config + preview
+        if total <= 0:
+            core, config, preview = 20, 20, 60
+            total = 100
+        if total != 100:
+            core = int(round((core * 100) / total))
+            config = int(round((config * 100) / total))
+            preview = max(5, 100 - core - config)
+            if core + config + preview != 100:
+                preview = 100 - core - config
+        values["build_core_percent"] = core
+        values["build_config_percent"] = config
+        values["build_preview_percent"] = preview
+        values["wizard_outer_left_percent"] = max(10, min(90, core))
+        composite = max(1, 100 - core)
+        values["wizard_package_left_percent"] = max(
+            10,
+            min(90, int(round((config * 100) / composite))),
+        )
+        return values
+
+    def _sync_runtime_controls_from_settings(self) -> None:
+        defaults = self.preferences_defaults
+        self.build_ratios_locked = bool(defaults.get("build_ratios_locked", True))
+        self.build_core_percent = int(defaults.get("build_core_percent", 20))
+        self.build_config_percent = int(defaults.get("build_config_percent", 20))
+        self.build_preview_percent = int(defaults.get("build_preview_percent", 60))
+        if hasattr(self, "view_toggle_sidebar_action"):
+            self.view_toggle_sidebar_action.blockSignals(True)
+            self.view_toggle_sidebar_action.setChecked(bool(defaults.get("nav_visible", True)))
+            self.view_toggle_sidebar_action.blockSignals(False)
+        self._set_sidebar_visible(bool(defaults.get("nav_visible", True)))
+
+        if hasattr(self, "file_view_tabs"):
+            mode = str(defaults.get("files_default_view_mode") or "raw").strip().lower()
+            self.file_view_tabs.setCurrentIndex(1 if mode == "form" else 0)
+
+        if hasattr(self, "ssh_remote_dir_edit"):
+            self.ssh_remote_dir_edit.setText(str(defaults.get("ssh_default_remote_dir") or ""))
+        if hasattr(self, "ssh_remote_fetch_path_edit"):
+            self.ssh_remote_fetch_path_edit.setText(str(defaults.get("ssh_default_remote_file") or ""))
+        if hasattr(self, "ssh_backup_checkbox"):
+            self.ssh_backup_checkbox.setChecked(
+                bool(defaults.get("ssh_default_backup_before_upload", True))
+            )
+        if hasattr(self, "ssh_restart_checkbox"):
+            self.ssh_restart_checkbox.setChecked(
+                bool(defaults.get("ssh_default_restart_after_upload", False))
+            )
+        if hasattr(self, "ssh_restart_cmd_edit"):
+            self.ssh_restart_cmd_edit.setText(str(defaults.get("ssh_default_restart_command") or ""))
+        if hasattr(self, "ssh_save_on_success_checkbox"):
+            self.ssh_save_on_success_checkbox.setChecked(bool(defaults.get("ssh_save_on_success", True)))
+        if hasattr(self, "ssh_auto_connect_checkbox"):
+            self.ssh_auto_connect_checkbox.blockSignals(True)
+            self.ssh_auto_connect_checkbox.setChecked(bool(defaults.get("auto_connect_enabled", True)))
+            self.ssh_auto_connect_checkbox.blockSignals(False)
+
+        if hasattr(self, "manage_backup_root_edit"):
+            self.manage_backup_root_edit.setText(str(defaults.get("ssh_default_backup_root") or ""))
+        if hasattr(self, "modify_backup_root_edit"):
+            self.modify_backup_root_edit.setText(str(defaults.get("ssh_default_backup_root") or ""))
+        if hasattr(self, "manage_scan_depth_spin"):
+            self.manage_scan_depth_spin.setValue(
+                max(1, min(10, int(defaults.get("manage_default_scan_depth", 5))))
+            )
+        if hasattr(self, "manage_control_url_edit"):
+            self.manage_control_url_edit.setText(str(defaults.get("manage_default_control_url") or ""))
+
+        if hasattr(self, "scan_cidr_edit"):
+            self.scan_cidr_edit.setText(str(defaults.get("discovery_default_ip_range") or ""))
+        if hasattr(self, "scan_timeout_spin"):
+            self.scan_timeout_spin.setValue(
+                max(0.05, min(5.0, float(defaults.get("discovery_default_timeout_seconds", 0.35))))
+            )
+        if hasattr(self, "scan_max_hosts_spin"):
+            self.scan_max_hosts_spin.setValue(
+                max(1, min(4096, int(defaults.get("discovery_default_max_hosts", 254))))
+            )
+
+    def _apply_settings_to_runtime_ui(self) -> None:
+        self._apply_theme_mode(str(self.preferences_defaults.get("theme_mode") or "dark"), persist=False)
+        self._apply_ui_scale_mode(
+            str(self.preferences_defaults.get("ui_scale_mode") or "auto"),
+            persist=False,
+        )
+        self._set_sidebar_visible(bool(self.preferences_defaults.get("nav_visible", True)))
+        self.update_check_on_launch_enabled = bool(
+            self.preferences_defaults.get("update_check_on_launch", True)
+        )
+        self.auto_connect_enabled = bool(self.preferences_defaults.get("auto_connect_enabled", True))
+        self.default_ssh_connection_name = str(
+            self.preferences_defaults.get("default_connection_name") or ""
+        ).strip()
+        self.preview_pinned = bool(self.preferences_defaults.get("preview_pinned", self.preview_pinned))
+        self._set_preview_collapsed(
+            bool(self.preferences_defaults.get("preview_collapsed", self.preview_collapsed)),
+            persist=False,
+        )
+        self.wizard_outer_left_percent = max(
+            10,
+            min(90, int(self.preferences_defaults.get("wizard_outer_left_percent", 20))),
+        )
+        self.wizard_package_left_percent = max(
+            10,
+            min(90, int(self.preferences_defaults.get("wizard_package_left_percent", 25))),
+        )
+        self.build_ratios_locked = bool(self.preferences_defaults.get("build_ratios_locked", True))
+        self.build_core_percent = int(self.preferences_defaults.get("build_core_percent", 20))
+        self.build_config_percent = int(self.preferences_defaults.get("build_config_percent", 20))
+        self.build_preview_percent = int(self.preferences_defaults.get("build_preview_percent", 60))
+        if hasattr(self, "wizard_content_splitter") and hasattr(self, "wizard_package_splitter"):
+            self._apply_wizard_splitter_defaults()
+        if self._is_files_experiment_enabled() != bool(
+            self.preferences_defaults.get("files_experiment_enabled", False)
+        ):
+            self._set_files_experiment_enabled(
+                bool(self.preferences_defaults.get("files_experiment_enabled", False))
+            )
+        self._sync_runtime_controls_from_settings()
+
+    def _populate_settings_from_current_state(self, dialog: SettingsWindow) -> None:
+        values = dict(self._load_preferences_defaults())
+        values["build_ratios_locked"] = bool(self.build_ratios_locked)
+        values["build_core_percent"] = int(self.build_core_percent)
+        values["build_config_percent"] = int(self.build_config_percent)
+        values["build_preview_percent"] = int(self.build_preview_percent)
+        if hasattr(self, "wizard_content_splitter"):
+            outer_sizes = self.wizard_content_splitter.sizes()
+            outer_total = sum(outer_sizes)
+            if outer_total > 0 and outer_sizes:
+                values["wizard_outer_left_percent"] = max(
+                    10,
+                    min(90, int(round((outer_sizes[0] / outer_total) * 100))),
+                )
+        if hasattr(self, "wizard_package_splitter"):
+            package_sizes = self.wizard_package_splitter.sizes()
+            package_total = sum(package_sizes)
+            if package_total > 0 and package_sizes:
+                values["wizard_package_left_percent"] = max(
+                    10,
+                    min(90, int(round((package_sizes[0] / package_total) * 100))),
+                )
+        if hasattr(self, "_capture_build_panel_ratios") and not bool(self.build_ratios_locked):
+            core, config, preview = self._capture_build_panel_ratios()
+            values["build_core_percent"] = core
+            values["build_config_percent"] = config
+            values["build_preview_percent"] = preview
+        if hasattr(self, "ssh_remote_dir_edit"):
+            values["ssh_default_remote_dir"] = self.ssh_remote_dir_edit.text().strip()
+        if hasattr(self, "ssh_remote_fetch_path_edit"):
+            values["ssh_default_remote_file"] = self.ssh_remote_fetch_path_edit.text().strip()
+        if hasattr(self, "ssh_backup_checkbox"):
+            values["ssh_default_backup_before_upload"] = self.ssh_backup_checkbox.isChecked()
+        if hasattr(self, "ssh_restart_checkbox"):
+            values["ssh_default_restart_after_upload"] = self.ssh_restart_checkbox.isChecked()
+        if hasattr(self, "ssh_restart_cmd_edit"):
+            values["ssh_default_restart_command"] = self.ssh_restart_cmd_edit.text().strip()
+        if hasattr(self, "ssh_save_on_success_checkbox"):
+            values["ssh_save_on_success"] = self.ssh_save_on_success_checkbox.isChecked()
+        if hasattr(self, "manage_backup_root_edit"):
+            values["ssh_default_backup_root"] = self.manage_backup_root_edit.text().strip()
+        if hasattr(self, "manage_scan_depth_spin"):
+            values["manage_default_scan_depth"] = self.manage_scan_depth_spin.value()
+        if hasattr(self, "manage_control_url_edit"):
+            values["manage_default_control_url"] = self.manage_control_url_edit.text().strip()
+        if hasattr(self, "scan_cidr_edit"):
+            values["discovery_default_ip_range"] = self.scan_cidr_edit.text().strip()
+        if hasattr(self, "scan_timeout_spin"):
+            values["discovery_default_timeout_seconds"] = float(self.scan_timeout_spin.value())
+        if hasattr(self, "scan_max_hosts_spin"):
+            values["discovery_default_max_hosts"] = int(self.scan_max_hosts_spin.value())
+        values["profile_store"] = {}
+        try:
+            for name in self.saved_connection_service.list_names():
+                profile = self.saved_connection_service.load(name)
+                if isinstance(profile, dict):
+                    values["profile_store"][name] = dict(profile)
+        except OSError:
+            values["profile_store"] = {}
+        dialog._load_into_controls(values, replace_profiles=True)
+        dialog.on_theme_preview = lambda mode: self._apply_theme_mode(mode, persist=False)
+        dialog.on_scale_preview = lambda mode: self._apply_ui_scale_mode(mode, persist=False)
+        dialog.on_nav_preview = self._set_sidebar_visible
+        dialog.on_reset_layout = self._reset_layout
+        dialog.on_open_guided_setup = self._open_guided_component_setup
+        dialog.on_check_updates_now = lambda: self._check_for_updates(source="manual")
+
+    def _apply_settings_values(self, values: dict[str, Any], *, source: str) -> None:
+        if not isinstance(values, dict):
+            return
+
+        def _as_bool(raw: Any, default: bool) -> bool:
+            if isinstance(raw, bool):
+                return raw
+            text = str(raw).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+            return default
+
+        def _as_int(raw: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, value))
+
+        def _as_float(raw: Any, default: float, minimum: float, maximum: float) -> float:
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, value))
+
+        merged = dict(self._load_preferences_defaults())
+        merged.update(values)
+
+        merged["theme_mode"] = str(merged.get("theme_mode") or "dark").strip().lower()
+        if merged["theme_mode"] not in {"dark", "light"}:
+            merged["theme_mode"] = "dark"
+        merged["ui_scale_mode"] = str(merged.get("ui_scale_mode") or "auto").strip().lower()
+        if merged["ui_scale_mode"] not in {"auto", "85", "90", "100", "110", "125", "150"}:
+            merged["ui_scale_mode"] = "auto"
+        merged["files_default_view_mode"] = str(merged.get("files_default_view_mode") or "raw").strip().lower()
+        if merged["files_default_view_mode"] not in {"raw", "form"}:
+            merged["files_default_view_mode"] = "raw"
+        merged["nav_visible"] = _as_bool(merged.get("nav_visible"), True)
+        merged["update_check_on_launch"] = _as_bool(merged.get("update_check_on_launch"), True)
+        merged["files_experiment_enabled"] = _as_bool(
+            merged.get("files_experiment_enabled"),
+            False,
+        )
+        merged["preview_collapsed"] = _as_bool(merged.get("preview_collapsed"), False)
+        merged["preview_pinned"] = _as_bool(merged.get("preview_pinned"), False)
+        merged["wizard_outer_left_percent"] = _as_int(
+            merged.get("wizard_outer_left_percent"),
+            self.WIZARD_OUTER_LEFT_PERCENT_DEFAULT,
+            10,
+            90,
+        )
+        merged["wizard_package_left_percent"] = _as_int(
+            merged.get("wizard_package_left_percent"),
+            self.WIZARD_PACKAGE_LEFT_PERCENT_DEFAULT,
+            10,
+            90,
+        )
+        merged["build_ratios_locked"] = _as_bool(
+            merged.get("build_ratios_locked"),
+            True,
+        )
+        core = _as_int(merged.get("build_core_percent"), 20, 5, 90)
+        config = _as_int(merged.get("build_config_percent"), 20, 5, 90)
+        preview = _as_int(merged.get("build_preview_percent"), 60, 5, 90)
+        ratio_total = core + config + preview
+        if ratio_total <= 0:
+            core, config, preview = 20, 20, 60
+            ratio_total = 100
+        if ratio_total != 100:
+            core = int(round((core * 100) / ratio_total))
+            config = int(round((config * 100) / ratio_total))
+            preview = max(5, 100 - core - config)
+            if core + config + preview != 100:
+                preview = 100 - core - config
+        merged["build_core_percent"] = core
+        merged["build_config_percent"] = config
+        merged["build_preview_percent"] = preview
+        merged["wizard_outer_left_percent"] = max(10, min(90, core))
+        composite = max(1, 100 - core)
+        merged["wizard_package_left_percent"] = max(
+            10,
+            min(90, int(round((config * 100) / composite))),
+        )
+        merged["manage_default_scan_depth"] = _as_int(merged.get("manage_default_scan_depth"), 5, 1, 10)
+        merged["discovery_default_timeout_seconds"] = _as_float(
+            merged.get("discovery_default_timeout_seconds"),
+            0.35,
+            0.05,
+            5.0,
+        )
+        merged["discovery_default_max_hosts"] = _as_int(
+            merged.get("discovery_default_max_hosts"),
+            254,
+            1,
+            4096,
+        )
+        merged["auto_connect_enabled"] = _as_bool(merged.get("auto_connect_enabled"), True)
+        merged["ssh_save_on_success"] = _as_bool(merged.get("ssh_save_on_success"), True)
+        merged["default_connection_name"] = str(merged.get("default_connection_name") or "").strip()
+
+        profile_store = values.get("profile_store")
+        target_profiles = profile_store if isinstance(profile_store, dict) else {}
+        try:
+            existing_names = self.saved_connection_service.list_names()
+        except OSError:
+            existing_names = []
+        target_names: set[str] = set()
+        for raw_name, payload in target_profiles.items():
+            name = str(raw_name).strip()
+            if not name or not isinstance(payload, dict):
+                continue
+            try:
+                self.saved_connection_service.save(name, payload)
+                target_names.add(name)
+            except (OSError, ValueError):
+                continue
+        for name in existing_names:
+            if name not in target_names:
+                try:
+                    self.saved_connection_service.delete(name)
+                except OSError:
+                    continue
+
+        self.app_settings.setValue(self.NAV_VISIBLE_SETTING_KEY, merged["nav_visible"])
+        self.app_settings.setValue("ui/default_route", str(merged.get("default_route") or "home"))
+        self.app_settings.setValue("ui/theme_mode", merged["theme_mode"])
+        self.ui_scaling_service.save_mode(str(merged["ui_scale_mode"]))
+        self.app_settings.setValue("ui/persistent_preview_collapsed", merged["preview_collapsed"])
+        self.app_settings.setValue("ui/persistent_preview_pinned", merged["preview_pinned"])
+        self.app_settings.setValue(
+            self.WIZARD_OUTER_LEFT_PERCENT_SETTING_KEY,
+            merged["wizard_outer_left_percent"],
+        )
+        self.app_settings.setValue(
+            self.WIZARD_PACKAGE_LEFT_PERCENT_SETTING_KEY,
+            merged["wizard_package_left_percent"],
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_RATIOS_LOCKED_SETTING_KEY,
+            merged["build_ratios_locked"],
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_CORE_PERCENT_SETTING_KEY,
+            merged["build_core_percent"],
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_CONFIG_PERCENT_SETTING_KEY,
+            merged["build_config_percent"],
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_PREVIEW_PERCENT_SETTING_KEY,
+            merged["build_preview_percent"],
+        )
+        self.app_settings.setValue(
+            self.FILES_DEFAULT_VIEW_MODE_SETTING_KEY,
+            merged["files_default_view_mode"],
+        )
+        self.app_settings.setValue(
+            self.SSH_SAVE_ON_SUCCESS_SETTING_KEY,
+            merged["ssh_save_on_success"],
+        )
+        self.app_settings.setValue(
+            self.SSH_DEFAULT_REMOTE_DIR_SETTING_KEY,
+            str(merged.get("ssh_default_remote_dir") or "~/printer_data/config"),
+        )
+        self.app_settings.setValue(
+            self.SSH_DEFAULT_REMOTE_FILE_SETTING_KEY,
+            str(merged.get("ssh_default_remote_file") or "~/printer_data/config/printer.cfg"),
+        )
+        self.app_settings.setValue(
+            self.SSH_DEFAULT_BACKUP_ROOT_SETTING_KEY,
+            str(merged.get("ssh_default_backup_root") or "~/klippconfig_backups"),
+        )
+        self.app_settings.setValue(
+            self.SSH_DEFAULT_RESTART_COMMAND_SETTING_KEY,
+            str(merged.get("ssh_default_restart_command") or "sudo systemctl restart klipper"),
+        )
+        self.app_settings.setValue(
+            self.SSH_DEFAULT_BACKUP_BEFORE_UPLOAD_SETTING_KEY,
+            _as_bool(merged.get("ssh_default_backup_before_upload"), True),
+        )
+        self.app_settings.setValue(
+            self.SSH_DEFAULT_RESTART_AFTER_UPLOAD_SETTING_KEY,
+            _as_bool(merged.get("ssh_default_restart_after_upload"), False),
+        )
+        self.app_settings.setValue(
+            self.MANAGE_DEFAULT_SCAN_DEPTH_SETTING_KEY,
+            merged["manage_default_scan_depth"],
+        )
+        self.app_settings.setValue(
+            self.MANAGE_DEFAULT_CONTROL_URL_SETTING_KEY,
+            str(merged.get("manage_default_control_url") or ""),
+        )
+        self.app_settings.setValue(
+            self.DISCOVERY_DEFAULT_IP_RANGE_SETTING_KEY,
+            str(merged.get("discovery_default_ip_range") or "192.168.1.0/24"),
+        )
+        self.app_settings.setValue(
+            self.DISCOVERY_DEFAULT_TIMEOUT_SETTING_KEY,
+            merged["discovery_default_timeout_seconds"],
+        )
+        self.app_settings.setValue(
+            self.DISCOVERY_DEFAULT_MAX_HOSTS_SETTING_KEY,
+            merged["discovery_default_max_hosts"],
+        )
+        self.app_settings.setValue(
+            self.UPDATE_CHECK_ON_LAUNCH_SETTING_KEY,
+            merged["update_check_on_launch"],
+        )
+        self.app_settings.setValue(
+            self.FILES_EXPERIMENT_SETTING_KEY,
+            merged["files_experiment_enabled"],
+        )
+        self.app_settings.setValue(
+            self.SETTINGS_LAST_PAGE_SETTING_KEY,
+            str(merged.get("settings_last_page") or "general"),
+        )
+        self.app_settings.sync()
+
+        try:
+            self.saved_connection_service.set_auto_connect_enabled(
+                bool(merged["auto_connect_enabled"])
+            )
+            self.saved_connection_service.set_default_connection_name(
+                merged["default_connection_name"],
+            )
+        except OSError:
+            pass
+        self.auto_connect_enabled = bool(merged["auto_connect_enabled"])
+        self.default_ssh_connection_name = str(merged["default_connection_name"] or "").strip()
+
+        self.preferences_defaults = self._load_preferences_defaults()
+        self._apply_settings_to_runtime_ui()
+        self._refresh_saved_connection_profiles(select_name=self.default_ssh_connection_name or None)
+        self._refresh_tools_connect_menu()
+        self.statusBar().showMessage(f"Settings applied ({source})", 2500)
 
     def _is_update_check_on_launch_enabled(self) -> bool:
         return bool(self.update_check_on_launch_enabled)
@@ -691,6 +2204,7 @@ QGroupBox::title {
         self.toast_anchor = root
 
         self.tabs = QTabWidget(root)
+        self.tabs.setObjectName("main_route_tabs")
         self.route_nav_bar = self._build_route_nav_bar(root)
         # Kept for compatibility with existing tests and route metadata checks.
         self.left_nav_scaffold = LeftNav(root)
@@ -711,6 +2225,7 @@ QGroupBox::title {
             if self._is_files_experiment_enabled()
             else self._build_files_tab()
         )
+        self.files_audit_tab = self._build_files_audit_tab()
         self.live_deploy_tab = self._build_live_deploy_tab()
         self._ensure_printer_connection_window()
         self.printers_tab = self._build_printers_tab()
@@ -720,6 +2235,7 @@ QGroupBox::title {
         self.tabs.addTab(self.main_tab, "Main")
         self.tabs.addTab(self.wizard_tab, "Configuration")
         self.tabs.addTab(self.files_tab, "Files")
+        self.tabs.addTab(self.files_audit_tab, "Files Audit")
         self.tabs.addTab(self.printers_tab, "Printers")
         self.tabs.addTab(self.modify_existing_tab, "Modify Existing")
         self.tabs.addTab(self.manage_printer_tab, "Manage Printer")
@@ -741,8 +2257,10 @@ QGroupBox::title {
     def _build_route_nav_bar(self, parent: QWidget) -> QWidget:
         bar = QWidget(parent)
         bar.setObjectName("route_nav_bar")
+        bar.setMinimumHeight(38)
+        bar.setMaximumHeight(38)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 5, 12, 5)
+        layout.setContentsMargins(12, 3, 12, 3)
         layout.setSpacing(8)
         self.route_nav_buttons: dict[str, QToolButton] = {}
         self.route_nav_button_group = QButtonGroup(self)
@@ -753,6 +2271,8 @@ QGroupBox::title {
                 continue
             button = QToolButton(bar)
             button.setObjectName("route_nav_button")
+            button.setMinimumHeight(22)
+            button.setMaximumHeight(22)
             button.setText(route.label)
             button.setCheckable(True)
             button.setAutoExclusive(True)
@@ -830,9 +2350,9 @@ QGroupBox::title {
     def _open_printers_webview_or_setup(self) -> None:
         self.app_state_store.update_ui(active_route="printers", right_panel_mode="context")
         if not self._has_ssh_target_configured():
-            self._open_printer_connection_window(active_route="printers")
+            self._open_settings_dialog(initial_page="ssh_profiles")
             self.statusBar().showMessage(
-                "Set SSH host and username to configure a printer first.",
+                "Set up an SSH profile in Settings before opening Printers view.",
                 3500,
             )
             return
@@ -933,9 +2453,13 @@ QGroupBox::title {
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
         self._position_toast_notification()
+        if bool(getattr(self, "build_ratios_locked", True)):
+            self._apply_build_panel_ratios_locked()
 
     def showEvent(self, event) -> None:  # noqa: ANN001
         super().showEvent(event)
+        if bool(getattr(self, "build_ratios_locked", True)):
+            self._apply_build_panel_ratios_locked()
         if self.check_updates_on_launch and not self.update_check_attempted:
             self.update_check_attempted = True
             QTimer.singleShot(
@@ -1304,6 +2828,213 @@ QGroupBox::title {
         self.preview_panel_width = width
         self._persist_preview_settings()
 
+    @staticmethod
+    def _capture_splitter_left_percent(splitter: QSplitter, fallback: int) -> int:
+        sizes = splitter.sizes()
+        if len(sizes) < 2:
+            return max(10, min(90, fallback))
+        total = int(sum(sizes))
+        if total <= 0:
+            return max(10, min(90, fallback))
+        left = max(0, int(sizes[0]))
+        percent = int(round((left * 100) / total))
+        return max(10, min(90, percent))
+
+    @staticmethod
+    def _apply_splitter_left_percent(
+        splitter: QSplitter,
+        left_percent: int,
+        *,
+        min_panel_width: int = 120,
+    ) -> None:
+        sizes = splitter.sizes()
+        if len(sizes) < 2:
+            return
+        target_percent = max(10, min(90, int(left_percent)))
+        total = int(sum(sizes))
+        if total <= 0:
+            # Startup path: apply by ratio so first paint uses stable proportions.
+            splitter.setSizes([target_percent, max(10, 100 - target_percent)])
+            return
+        left = int(round((total * target_percent) / 100))
+        left = max(min_panel_width, min(left, total - min_panel_width))
+        right = max(min_panel_width, total - left)
+        splitter.setSizes([left, right])
+
+    @staticmethod
+    def _normalize_build_ratio_triplet(
+        core: int,
+        config: int,
+        preview: int,
+    ) -> tuple[int, int, int]:
+        core_i = max(5, min(90, int(core)))
+        config_i = max(5, min(90, int(config)))
+        preview_i = max(5, min(90, int(preview)))
+        total = core_i + config_i + preview_i
+        if total <= 0:
+            return 20, 20, 60
+        if total == 100:
+            return core_i, config_i, preview_i
+        core_i = int(round((core_i * 100) / total))
+        config_i = int(round((config_i * 100) / total))
+        preview_i = max(5, 100 - core_i - config_i)
+        if core_i + config_i + preview_i != 100:
+            preview_i = 100 - core_i - config_i
+        if preview_i < 5:
+            deficit = 5 - preview_i
+            preview_i = 5
+            if config_i > core_i:
+                config_i = max(5, config_i - deficit)
+            else:
+                core_i = max(5, core_i - deficit)
+            preview_i = 100 - core_i - config_i
+        return core_i, config_i, preview_i
+
+    def _capture_build_panel_ratios(self) -> tuple[int, int, int]:
+        core = int(getattr(self, "build_core_percent", 20))
+        config = int(getattr(self, "build_config_percent", 20))
+        preview = int(getattr(self, "build_preview_percent", 60))
+        if not hasattr(self, "wizard_content_splitter") or not hasattr(self, "wizard_package_splitter"):
+            return self._normalize_build_ratio_triplet(core, config, preview)
+
+        outer_sizes = self.wizard_content_splitter.sizes()
+        package_sizes = self.wizard_package_splitter.sizes()
+        if len(outer_sizes) < 2 or len(package_sizes) < 2:
+            return self._normalize_build_ratio_triplet(core, config, preview)
+
+        outer_total = int(sum(outer_sizes))
+        package_total = int(sum(package_sizes))
+        if outer_total <= 0 or package_total <= 0:
+            return self._normalize_build_ratio_triplet(core, config, preview)
+
+        outer_left = max(0, int(outer_sizes[0]))
+        outer_right = max(0, int(outer_sizes[1]))
+        package_left_fraction = max(0.0, min(1.0, float(package_sizes[0]) / float(package_total)))
+        config_abs = int(round((outer_right * package_left_fraction * 100.0) / float(outer_total)))
+        core_abs = int(round((outer_left * 100.0) / float(outer_total)))
+        preview_abs = 100 - core_abs - config_abs
+        return self._normalize_build_ratio_triplet(core_abs, config_abs, preview_abs)
+
+    def _apply_build_panel_ratios_locked(self) -> None:
+        if self._applying_locked_build_ratios:
+            return
+        if not hasattr(self, "wizard_content_splitter") or not hasattr(self, "wizard_package_splitter"):
+            return
+        self._applying_locked_build_ratios = True
+        try:
+            core, config, preview = self._normalize_build_ratio_triplet(
+                int(getattr(self, "build_core_percent", 20)),
+                int(getattr(self, "build_config_percent", 20)),
+                int(getattr(self, "build_preview_percent", 60)),
+            )
+            self.build_core_percent = core
+            self.build_config_percent = config
+            self.build_preview_percent = preview
+            self.wizard_outer_left_percent = core
+            composite = max(1, 100 - core)
+            self.wizard_package_left_percent = max(
+                10,
+                min(90, int(round((config * 100) / composite))),
+            )
+            outer_prev = self.wizard_content_splitter.blockSignals(True)
+            package_prev = self.wizard_package_splitter.blockSignals(True)
+            try:
+                self._apply_splitter_left_percent(
+                    self.wizard_content_splitter,
+                    self.wizard_outer_left_percent,
+                )
+                self._apply_splitter_left_percent(
+                    self.wizard_package_splitter,
+                    self.wizard_package_left_percent,
+                )
+            finally:
+                self.wizard_content_splitter.blockSignals(outer_prev)
+                self.wizard_package_splitter.blockSignals(package_prev)
+        finally:
+            self._applying_locked_build_ratios = False
+
+    def _persist_wizard_splitter_settings(self) -> None:
+        core, config, preview = self._normalize_build_ratio_triplet(
+            int(getattr(self, "build_core_percent", 20)),
+            int(getattr(self, "build_config_percent", 20)),
+            int(getattr(self, "build_preview_percent", 60)),
+        )
+        self.build_core_percent = core
+        self.build_config_percent = config
+        self.build_preview_percent = preview
+        self.app_settings.setValue(
+            self.WIZARD_OUTER_LEFT_PERCENT_SETTING_KEY,
+            int(self.wizard_outer_left_percent),
+        )
+        self.app_settings.setValue(
+            self.WIZARD_PACKAGE_LEFT_PERCENT_SETTING_KEY,
+            int(self.wizard_package_left_percent),
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_RATIOS_LOCKED_SETTING_KEY,
+            bool(getattr(self, "build_ratios_locked", True)),
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_CORE_PERCENT_SETTING_KEY,
+            int(core),
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_CONFIG_PERCENT_SETTING_KEY,
+            int(config),
+        )
+        self.app_settings.setValue(
+            self.BUILD_PANEL_PREVIEW_PERCENT_SETTING_KEY,
+            int(preview),
+        )
+        self.app_settings.sync()
+
+    def _apply_wizard_splitter_defaults(self) -> None:
+        if bool(getattr(self, "build_ratios_locked", True)):
+            self._apply_build_panel_ratios_locked()
+            return
+        if hasattr(self, "wizard_content_splitter"):
+            self._apply_splitter_left_percent(
+                self.wizard_content_splitter,
+                self.wizard_outer_left_percent,
+            )
+        if hasattr(self, "wizard_package_splitter"):
+            self._apply_splitter_left_percent(
+                self.wizard_package_splitter,
+                self.wizard_package_left_percent,
+            )
+
+    def _on_wizard_content_splitter_moved(self, _pos: int, _index: int) -> None:
+        if not hasattr(self, "wizard_content_splitter"):
+            return
+        if bool(getattr(self, "build_ratios_locked", True)):
+            self._apply_build_panel_ratios_locked()
+            self._persist_wizard_splitter_settings()
+            return
+        self.wizard_outer_left_percent = self._capture_splitter_left_percent(
+            self.wizard_content_splitter,
+            self.wizard_outer_left_percent,
+        )
+        self.build_core_percent, self.build_config_percent, self.build_preview_percent = (
+            self._capture_build_panel_ratios()
+        )
+        self._persist_wizard_splitter_settings()
+
+    def _on_wizard_package_splitter_moved(self, _pos: int, _index: int) -> None:
+        if not hasattr(self, "wizard_package_splitter"):
+            return
+        if bool(getattr(self, "build_ratios_locked", True)):
+            self._apply_build_panel_ratios_locked()
+            self._persist_wizard_splitter_settings()
+            return
+        self.wizard_package_left_percent = self._capture_splitter_left_percent(
+            self.wizard_package_splitter,
+            self.wizard_package_left_percent,
+        )
+        self.build_core_percent, self.build_config_percent, self.build_preview_percent = (
+            self._capture_build_panel_ratios()
+        )
+        self._persist_wizard_splitter_settings()
+
     def _toggle_preview_collapsed(self) -> None:
         self._set_preview_collapsed(not self.preview_collapsed)
 
@@ -1343,6 +3074,8 @@ QGroupBox::title {
             route = "home"
         elif current is self.files_tab:
             route = "files"
+        elif hasattr(self, "files_audit_tab") and current is self.files_audit_tab:
+            route = "files"
         elif current is self.modify_existing_tab:
             route = "edit_config"
         elif current is self.wizard_tab:
@@ -1373,10 +3106,13 @@ QGroupBox::title {
             self.app_state_store.update_ui(active_route=route, right_panel_mode="context")
             return
         if route == "edit_config":
-            self.tabs.setCurrentWidget(self.files_tab)
+            if hasattr(self, "files_audit_tab"):
+                self.tabs.setCurrentWidget(self.files_audit_tab)
+            else:
+                self.tabs.setCurrentWidget(self.files_tab)
             if hasattr(self, "validation_section_toggle"):
                 self.validation_section_toggle.setChecked(True)
-            self.app_state_store.update_ui(active_route=route, right_panel_mode="validation")
+            self.app_state_store.update_ui(active_route="files", right_panel_mode="validation")
             return
         if route == "generate":
             self.tabs.setCurrentWidget(self.wizard_tab)
@@ -1496,7 +3232,13 @@ QGroupBox::title {
         self._update_action_enablement()
 
     def _build_footer_connection_health(self) -> None:
-        self.statusBar().setSizeGripEnabled(False)
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(False)
+        # Keep showMessage() calls functional while collapsing the native bar
+        # so only the custom one-line footer is visible.
+        status_bar.setMaximumHeight(0)
+        status_bar.setMinimumHeight(0)
+        status_bar.hide()
         self.device_health_caption = self.bottom_status_bar.device_caption
         self.device_health_icon = self.bottom_status_bar.device_icon
         self._set_device_connection_health(False, "No active SSH session.")
@@ -1978,7 +3720,7 @@ QGroupBox::title {
         self.view_toggle_raw_form_action.triggered.connect(self._toggle_raw_form_mode)
         view_menu.addAction(self.view_toggle_raw_form_action)
 
-        self.view_theme_menu = view_menu.addMenu("Theme (Dark/Light)")
+        self.view_theme_menu = QMenu("Theme (Dark/Light)", self)
         self.view_theme_group = QActionGroup(self)
         self.view_theme_group.setExclusive(True)
         self.view_theme_dark_action = QAction("Dark", self)
@@ -1997,7 +3739,7 @@ QGroupBox::title {
         )
         self.view_theme_menu.addAction(self.view_theme_light_action)
 
-        self.view_experiments_menu = view_menu.addMenu("Experiments")
+        self.view_experiments_menu = QMenu("Experiments", self)
         self.view_files_experiment_action = QAction("Files UI v1", self)
         self.view_files_experiment_action.setCheckable(True)
         self.view_files_experiment_action.setChecked(self._is_files_experiment_enabled())
@@ -2008,8 +3750,8 @@ QGroupBox::title {
         self.view_reset_layout_action.triggered.connect(self._reset_layout)
         view_menu.addAction(self.view_reset_layout_action)
 
-        view_menu.addSeparator()
-        self._build_ui_scale_menu(view_menu, title="Zoom")
+        self._internal_preferences_menu = QMenu(self)
+        self._build_ui_scale_menu(self._internal_preferences_menu, title="Zoom")
 
         printer_menu = menu_bar.addMenu("Printer")
         self.printer_connect_action = QAction("Connection Window...", self)
@@ -2177,15 +3919,20 @@ QGroupBox::title {
     def _on_ui_scale_selected(self, mode: UIScaleMode, checked: bool) -> None:
         if not checked:
             return
+        self._apply_ui_scale_mode(mode, persist=True)
 
+    def _apply_ui_scale_mode(self, mode: str, *, persist: bool) -> None:
         app = QApplication.instance()
         if app is None:
             return
 
-        selected_mode = self.ui_scaling_service.resolve_mode(saved=mode)
-        self.ui_scaling_service.save_mode(selected_mode)
+        selected_mode = self.ui_scaling_service.resolve_mode(saved=str(mode))
+        if persist:
+            self.ui_scaling_service.save_mode(selected_mode)
         self.ui_scaling_service.apply(app, selected_mode)
         self.active_scale_mode = selected_mode
+        if selected_mode in self.ui_scale_actions:
+            self.ui_scale_actions[selected_mode].setChecked(True)
 
         label = "Auto" if selected_mode == "auto" else f"{selected_mode}%"
         self.statusBar().showMessage(f"UI scale set to {label}", 2500)
@@ -2242,20 +3989,53 @@ QGroupBox::title {
         if clicked is zip_button:
             self._export_zip()
 
-    def _open_settings_dialog(self) -> None:
+    def _open_settings_dialog(self, initial_page: str | None = None) -> None:
+        profile_store: dict[str, dict[str, Any]] = {}
+        try:
+            for name in self.saved_connection_service.list_names():
+                profile = self.saved_connection_service.load(name)
+                if isinstance(profile, dict):
+                    profile_store[name] = dict(profile)
+        except OSError:
+            profile_store = {}
+
+        initial_values = self._load_preferences_defaults()
         dialog = SettingsWindow(
-            check_updates_on_launch=self._is_update_check_on_launch_enabled(),
+            initial_values=initial_values,
+            profile_store=profile_store,
+            initial_page=initial_page or str(initial_values.get("settings_last_page") or "general"),
             parent=self,
         )
-        dialog.check_now_button.clicked.connect(lambda: self._check_for_updates(source="manual"))
+        self._populate_settings_from_current_state(dialog)
 
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._set_update_check_on_launch_enabled(dialog.update_check_checkbox.isChecked())
+        apply_baseline = dialog.collect_values()
+
+        def _apply_dialog_values() -> None:
+            nonlocal apply_baseline
+            values = dialog.collect_values()
+            self._apply_settings_values(values, source="dialog_apply")
+            apply_baseline = values
+
+        dialog.apply_button.clicked.connect(_apply_dialog_values)
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted:
+            final_values = dialog.collect_values()
+            if final_values != apply_baseline:
+                self._apply_settings_values(final_values, source="dialog_ok")
+            return
+
+        # Cancel should revert preview-only values not already applied.
+        self._apply_theme_mode(str(apply_baseline.get("theme_mode") or "dark"), persist=False)
+        self._apply_ui_scale_mode(str(apply_baseline.get("ui_scale_mode") or "auto"), persist=False)
+        self._set_sidebar_visible(bool(apply_baseline.get("nav_visible", True)))
 
     def _set_sidebar_visible(self, visible: bool) -> None:
         self.app_state_store.update_ui(left_nav_visible=visible)
         if hasattr(self, "route_nav_bar"):
             self.route_nav_bar.setVisible(visible)
+        self.app_settings.setValue(self.NAV_VISIBLE_SETTING_KEY, bool(visible))
+        self.app_settings.sync()
 
         self.statusBar().showMessage(
             "Navigation bar shown" if visible else "Navigation bar hidden",
@@ -2411,8 +4191,8 @@ QGroupBox::title {
 
         if hasattr(self, "file_view_tabs"):
             self.file_view_tabs.setCurrentIndex(0)
-        if hasattr(self, "wizard_package_splitter"):
-            self.wizard_package_splitter.setSizes([1, 3])
+        if hasattr(self, "wizard_content_splitter") or hasattr(self, "wizard_package_splitter"):
+            self._apply_wizard_splitter_defaults()
         if hasattr(self, "files_splitter"):
             self.files_splitter.setSizes([1, 3])
         self.statusBar().showMessage("Layout reset", 2500)
@@ -2428,8 +4208,11 @@ QGroupBox::title {
         )
 
     def _open_section_overrides(self) -> None:
-        self.tabs.setCurrentWidget(self.files_tab)
-        self.app_state_store.update_ui(active_route="edit_config", right_panel_mode="validation")
+        if hasattr(self, "files_audit_tab"):
+            self.tabs.setCurrentWidget(self.files_audit_tab)
+        else:
+            self.tabs.setCurrentWidget(self.files_tab)
+        self.app_state_store.update_ui(active_route="files", right_panel_mode="validation")
         if hasattr(self, "overrides_section_toggle"):
             self.overrides_section_toggle.setChecked(True)
         self.statusBar().showMessage("Opened section overrides", 2500)
@@ -2468,9 +4251,8 @@ QGroupBox::title {
         )
 
     def _open_saved_connections_manager(self) -> None:
-        self._open_printer_connection_window()
-        self._refresh_saved_connection_profiles()
-        self.statusBar().showMessage("Manage saved connections in Printer Connection window", 2500)
+        self._open_settings_dialog(initial_page="ssh_profiles")
+        self.statusBar().showMessage("Opened Settings -> SSH Profiles", 2500)
 
     def _disconnect_printer(self) -> None:
         self._set_device_connection_health(False, "Disconnected from printer.")
@@ -3541,6 +5323,7 @@ QGroupBox::title {
     def _build_modify_existing_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
+        defaults = dict(getattr(self, "preferences_defaults", {}))
 
         intro = QLabel(
             "Remote-only workflow: connect over SSH, open a .cfg file, modify/refactor/validate, "
@@ -3563,12 +5346,15 @@ QGroupBox::title {
 
         self.modify_remote_cfg_path_edit = QLineEdit(target_group)
         self.modify_remote_cfg_path_edit.setText(
-            self.ssh_remote_fetch_path_edit.text().strip() or "~/printer_data/config/printer.cfg"
+            self.ssh_remote_fetch_path_edit.text().strip()
+            or str(defaults.get("ssh_default_remote_file") or "~/printer_data/config/printer.cfg")
         )
         target_form.addRow("Remote .cfg path", self.modify_remote_cfg_path_edit)
 
         self.modify_backup_root_edit = QLineEdit(target_group)
-        self.modify_backup_root_edit.setText("~/klippconfig_backups")
+        self.modify_backup_root_edit.setText(
+            str(defaults.get("ssh_default_backup_root") or "~/klippconfig_backups")
+        )
         target_form.addRow("Backup root", self.modify_backup_root_edit)
 
         self.modify_restart_command_label = QLabel("", target_group)
@@ -3727,7 +5513,7 @@ QGroupBox::title {
     def _build_wizard_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(0)
 
         self.wizard_content_splitter = QSplitter(Qt.Orientation.Horizontal, tab)
@@ -4008,7 +5794,7 @@ QGroupBox::title {
         package_splitter = QSplitter(Qt.Orientation.Horizontal, self.wizard_content_splitter)
         self.wizard_package_splitter = package_splitter
 
-        package_list_group = QGroupBox("Project Package", package_splitter)
+        package_list_group = QGroupBox("Config", package_splitter)
         self.wizard_package_list_group = package_list_group
         package_list_layout = QVBoxLayout(package_list_group)
         self.wizard_package_file_list = QListWidget(package_list_group)
@@ -4017,7 +5803,7 @@ QGroupBox::title {
         )
         package_list_layout.addWidget(self.wizard_package_file_list, 1)
 
-        package_preview_group = QGroupBox("Selected File Preview", package_splitter)
+        package_preview_group = QGroupBox("File Preview", package_splitter)
         package_preview_layout = QVBoxLayout(package_preview_group)
         self.wizard_package_preview_label = QLabel("", package_preview_group)
         self.wizard_package_preview_label.setWordWrap(True)
@@ -4032,12 +5818,14 @@ QGroupBox::title {
 
         package_splitter.setStretchFactor(0, 1)
         package_splitter.setStretchFactor(1, 3)
+        package_splitter.splitterMoved.connect(self._on_wizard_package_splitter_moved)
 
         self.wizard_content_splitter.addWidget(wizard_left_column)
         self.wizard_content_splitter.addWidget(package_splitter)
         self.wizard_content_splitter.setStretchFactor(0, 2)
         self.wizard_content_splitter.setStretchFactor(1, 3)
-        self.wizard_content_splitter.setSizes([560, 840])
+        self.wizard_content_splitter.splitterMoved.connect(self._on_wizard_content_splitter_moved)
+        self._apply_wizard_splitter_defaults()
 
         layout.addWidget(self.wizard_content_splitter, 1)
         return tab
@@ -4058,6 +5846,8 @@ QGroupBox::title {
             self.apply_form_btn.setObjectName("files_primary_action")
         if hasattr(self, "refactor_cfg_btn"):
             self.refactor_cfg_btn.setObjectName("files_tonal_action")
+        if hasattr(self, "files_open_audit_btn"):
+            self.files_open_audit_btn.setObjectName("files_tonal_action")
         if hasattr(self, "preview_path_label"):
             self.preview_path_label.setObjectName("files_path_label")
         if hasattr(self, "files_breadcrumbs_label"):
@@ -4183,6 +5973,13 @@ QGroupBox::title {
         self.refactor_cfg_btn.clicked.connect(self._refactor_current_cfg_file)
         top_row.addWidget(self.refactor_cfg_btn)
 
+        self.files_health_indicator = QLabel("Health: not checked", self.files_top_command_bar)
+        top_row.addWidget(self.files_health_indicator)
+
+        self.files_open_audit_btn = QPushButton("Open Audit", self.files_top_command_bar)
+        self.files_open_audit_btn.clicked.connect(self._open_files_audit_tab)
+        top_row.addWidget(self.files_open_audit_btn)
+
         self.preview_path_label = QLabel("No file selected.", self.files_top_command_bar)
         top_row.addWidget(self.preview_path_label, 1)
 
@@ -4262,13 +6059,47 @@ QGroupBox::title {
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         layout.addWidget(splitter, 1)
+        self._set_files_health_indicator()
+        return tab
 
+    def _build_files_audit_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        self.files_audit_back_btn = QPushButton("Back to Files", tab)
+        self.files_audit_back_btn.clicked.connect(self._open_files_editor_tab)
+        header_row.addWidget(self.files_audit_back_btn)
+
+        header_label = QLabel("Audit", tab)
+        header_label.setStyleSheet("QLabel { font-weight: 600; }")
+        header_row.addWidget(header_label)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        self.files_audit_scroll = QScrollArea(tab)
+        self.files_audit_scroll.setWidgetResizable(True)
+        content = QWidget(self.files_audit_scroll)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+
+        self._build_files_audit_sections(parent=content, host_layout=content_layout)
+        content_layout.addStretch(1)
+
+        self.files_audit_scroll.setWidget(content)
+        layout.addWidget(self.files_audit_scroll, 1)
+        return tab
+
+    def _build_files_audit_sections(self, *, parent: QWidget, host_layout: QVBoxLayout) -> None:
         (
             import_review_section,
             self.import_review_section_toggle,
             self.import_review_section_content,
             import_review_layout,
-        ) = self._build_collapsible_section("Import Review", tab, expanded=True)
+        ) = self._build_collapsible_section("Import Review", parent, expanded=True)
 
         self.import_review_status_label = QLabel(
             "No imported machine analysis loaded.",
@@ -4278,6 +6109,7 @@ QGroupBox::title {
         import_review_layout.addWidget(self.import_review_status_label)
 
         self.import_review_table = QTableWidget(self.import_review_section_content)
+        self.import_review_table.setObjectName("files_import_review_table")
         self.import_review_table.setColumnCount(6)
         self.import_review_table.setHorizontalHeaderLabels(
             ["Apply", "Field", "Value", "Confidence", "Reason", "Source"]
@@ -4312,14 +6144,14 @@ QGroupBox::title {
         import_actions.addWidget(self.import_select_high_btn)
         import_actions.addStretch(1)
         import_review_layout.addLayout(import_actions)
-        layout.addWidget(import_review_section)
+        host_layout.addWidget(import_review_section)
 
         (
             overrides_section,
             self.overrides_section_toggle,
             self.overrides_section_content,
             overrides_layout,
-        ) = self._build_collapsible_section("Section Overrides", tab, expanded=False)
+        ) = self._build_collapsible_section("Section Overrides", parent, expanded=False)
 
         description = QLabel(
             "Advanced overrides for generated output. Keys can use forms like "
@@ -4360,20 +6192,21 @@ QGroupBox::title {
         button_row.addWidget(validate_btn)
 
         overrides_layout.addLayout(button_row)
-        layout.addWidget(overrides_section)
+        host_layout.addWidget(overrides_section)
 
         (
             validation_section,
             self.validation_section_toggle,
             self.validation_section_content,
             validation_layout,
-        ) = self._build_collapsible_section("Validation Findings", tab, expanded=False)
+        ) = self._build_collapsible_section("Validation Findings", parent, expanded=False)
 
         self.validation_status_label = QLabel("No validation run yet.", self.validation_section_content)
         self.validation_status_label.setWordWrap(True)
         validation_layout.addWidget(self.validation_status_label)
 
         self.validation_table = QTableWidget(self.validation_section_content)
+        self.validation_table.setObjectName("files_validation_table")
         self.validation_table.setColumnCount(4)
         self.validation_table.setHorizontalHeaderLabels(["Severity", "Code", "Field", "Message"])
         self.validation_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -4389,8 +6222,78 @@ QGroupBox::title {
         rerun_btn.clicked.connect(self._render_and_validate)
         validation_layout.addWidget(rerun_btn)
 
-        layout.addWidget(validation_section)
-        return tab
+        host_layout.addWidget(validation_section)
+
+    def _open_files_audit_tab(self) -> None:
+        if not hasattr(self, "files_audit_tab"):
+            return
+        self.tabs.setCurrentWidget(self.files_audit_tab)
+        self.app_state_store.update_ui(active_route="files", right_panel_mode="validation")
+
+    def _open_files_editor_tab(self) -> None:
+        if not hasattr(self, "files_tab"):
+            return
+        self.tabs.setCurrentWidget(self.files_tab)
+        self.app_state_store.update_ui(active_route="files", right_panel_mode="context")
+
+    def _set_files_health_indicator(
+        self,
+        blocking: int | None = None,
+        warnings: int | None = None,
+    ) -> None:
+        if not hasattr(self, "files_health_indicator"):
+            return
+        if blocking is None or warnings is None:
+            text = "Health: not checked"
+            style = (
+                "QLabel {"
+                " background-color: #2f333d;"
+                " color: #d4d7de;"
+                " border: 1px solid #4b4f59;"
+                " border-radius: 4px;"
+                " padding: 4px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+        elif blocking > 0:
+            text = f"Health: blocked ({blocking})"
+            style = (
+                "QLabel {"
+                " background-color: #7f1d1d;"
+                " color: #ffffff;"
+                " border: 1px solid #ef4444;"
+                " border-radius: 4px;"
+                " padding: 4px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+        elif warnings > 0:
+            text = f"Health: warnings ({warnings})"
+            style = (
+                "QLabel {"
+                " background-color: #78350f;"
+                " color: #ffffff;"
+                " border: 1px solid #f59e0b;"
+                " border-radius: 4px;"
+                " padding: 4px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+        else:
+            text = "Health: good"
+            style = (
+                "QLabel {"
+                " background-color: #14532d;"
+                " color: #ffffff;"
+                " border: 1px solid #16a34a;"
+                " border-radius: 4px;"
+                " padding: 4px 8px;"
+                " font-weight: 600;"
+                "}"
+            )
+        self.files_health_indicator.setText(text)
+        self.files_health_indicator.setStyleSheet(style)
+        self.files_health_indicator.setToolTip(text)
 
     def _build_collapsible_section(
         self,
@@ -4429,6 +6332,7 @@ QGroupBox::title {
     def _build_live_deploy_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
+        defaults = dict(getattr(self, "preferences_defaults", {}))
 
         connection_group = QGroupBox("SSH Connection", tab)
         connection_form = QFormLayout(connection_group)
@@ -4508,7 +6412,9 @@ QGroupBox::title {
             "Save on successful connect (uses Connection name)",
             connection_group,
         )
-        self.ssh_save_on_success_checkbox.setChecked(True)
+        self.ssh_save_on_success_checkbox.setChecked(
+            bool(defaults.get("ssh_save_on_success", True))
+        )
         connection_form.addRow(self.ssh_save_on_success_checkbox)
 
         self.ssh_auto_connect_checkbox = QCheckBox(
@@ -4520,12 +6426,23 @@ QGroupBox::title {
         connection_form.addRow(self.ssh_auto_connect_checkbox)
 
         self.ssh_remote_dir_edit = QLineEdit(connection_group)
-        self.ssh_remote_dir_edit.setText("~/printer_data/config")
+        self.ssh_remote_dir_edit.setText(
+            str(defaults.get("ssh_default_remote_dir") or "~/printer_data/config")
+        )
         connection_form.addRow("Remote cfg dir", self.ssh_remote_dir_edit)
 
         self.ssh_remote_fetch_path_edit = QLineEdit(connection_group)
-        self.ssh_remote_fetch_path_edit.setText("~/printer_data/config/printer.cfg")
+        self.ssh_remote_fetch_path_edit.setText(
+            str(defaults.get("ssh_default_remote_file") or "~/printer_data/config/printer.cfg")
+        )
         connection_form.addRow("Remote file", self.ssh_remote_fetch_path_edit)
+
+        # Moved to Settings -> SSH Profiles and Printer Defaults.
+        saved_row.hide()
+        self.ssh_connection_name_edit.hide()
+        default_row.hide()
+        self.ssh_save_on_success_checkbox.hide()
+        self.ssh_auto_connect_checkbox.hide()
 
         layout.addWidget(connection_group)
 
@@ -4533,20 +6450,26 @@ QGroupBox::title {
         options_form = QFormLayout(options_group)
 
         self.ssh_backup_checkbox = QCheckBox("Backup remote config before upload", options_group)
-        self.ssh_backup_checkbox.setChecked(True)
+        self.ssh_backup_checkbox.setChecked(
+            bool(defaults.get("ssh_default_backup_before_upload", True))
+        )
         options_form.addRow(self.ssh_backup_checkbox)
 
         self.ssh_restart_checkbox = QCheckBox("Restart Klipper after upload", options_group)
-        self.ssh_restart_checkbox.setChecked(False)
+        self.ssh_restart_checkbox.setChecked(
+            bool(defaults.get("ssh_default_restart_after_upload", False))
+        )
         options_form.addRow(self.ssh_restart_checkbox)
 
         self.ssh_restart_cmd_edit = QLineEdit(options_group)
-        self.ssh_restart_cmd_edit.setText("sudo systemctl restart klipper")
+        self.ssh_restart_cmd_edit.setText(
+            str(defaults.get("ssh_default_restart_command") or "sudo systemctl restart klipper")
+        )
         options_form.addRow("Restart command", self.ssh_restart_cmd_edit)
-        layout.addWidget(options_group)
+        options_group.hide()
 
         action_hint = QLabel(
-            "Use Tools -> Scan For Printers... to discover hosts, then use Printer + Configuration menus for workflows.",
+            "Profile management and deploy defaults moved to Settings. Use this screen for live connection actions.",
             tab,
         )
         action_hint.setWordWrap(True)
@@ -4568,6 +6491,7 @@ QGroupBox::title {
     def _build_manage_printer_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
+        defaults = dict(getattr(self, "preferences_defaults", {}))
 
         intro = QLabel(
             "Manage a connected printer directly over SSH: browse/edit files, create backups, and restore backups.",
@@ -4599,19 +6523,27 @@ QGroupBox::title {
         self.manage_control_url_edit.setPlaceholderText(
             "optional; defaults to host (for example: http://printer.local/)"
         )
+        self.manage_control_url_edit.setText(str(defaults.get("manage_default_control_url") or ""))
         target_form.addRow("Control URL", self.manage_control_url_edit)
 
         self.manage_remote_dir_edit = QLineEdit(target_group)
-        self.manage_remote_dir_edit.setText(self.ssh_remote_dir_edit.text().strip())
+        self.manage_remote_dir_edit.setText(
+            self.ssh_remote_dir_edit.text().strip()
+            or str(defaults.get("ssh_default_remote_dir") or "~/printer_data/config")
+        )
         target_form.addRow("Remote cfg dir", self.manage_remote_dir_edit)
 
         self.manage_backup_root_edit = QLineEdit(target_group)
-        self.manage_backup_root_edit.setText("~/klippconfig_backups")
+        self.manage_backup_root_edit.setText(
+            str(defaults.get("ssh_default_backup_root") or "~/klippconfig_backups")
+        )
         target_form.addRow("Backup root", self.manage_backup_root_edit)
 
         self.manage_scan_depth_spin = QSpinBox(target_group)
         self.manage_scan_depth_spin.setRange(1, 10)
-        self.manage_scan_depth_spin.setValue(5)
+        self.manage_scan_depth_spin.setValue(
+            max(1, min(10, int(defaults.get("manage_default_scan_depth", 5))))
+        )
         target_form.addRow("File scan depth", self.manage_scan_depth_spin)
 
         layout.addWidget(target_group)
@@ -5266,6 +7198,7 @@ QGroupBox::title {
             self.validation_status_label.setText(f"No blocking issues. Warnings: {warning_count}.")
         else:
             self.validation_status_label.setText("No validation issues detected.")
+        self._set_files_health_indicator(blocking_count, warning_count)
         self._update_validation_issue_notification(blocking_count, warning_count)
         self._update_live_conflict_alert(report, sorted_findings)
 
@@ -5660,6 +7593,7 @@ QGroupBox::title {
         self.cfg_tools_status_label.clear()
         self.cfg_tools_status_label.setStyleSheet("")
         self.cfg_tools_status_label.setVisible(False)
+        self._set_files_health_indicator()
         self._update_files_experiment_chips(blocking=0, warnings=0, source_label="")
 
     def _update_cfg_tools_status(self, report: ValidationReport, source_label: str) -> None:
@@ -5756,6 +7690,7 @@ QGroupBox::title {
         self.cfg_tools_status_label.setText(message)
         self.cfg_tools_status_label.setStyleSheet(style)
         self.cfg_tools_status_label.setVisible(True)
+        self._set_files_health_indicator(blocking, warnings)
         self._update_files_experiment_chips(
             blocking=blocking,
             warnings=warnings,
@@ -6349,6 +8284,28 @@ QGroupBox::title {
         self.scan_max_hosts_spin = discovery_window.scan_max_hosts_spin
         self.discovery_results_table = discovery_window.discovery_results_table
         self.scan_network_btn = discovery_window.scan_network_btn
+        defaults = getattr(self, "preferences_defaults", {})
+        self.scan_cidr_edit.setText(
+            str(defaults.get("discovery_default_ip_range") or self.scan_cidr_edit.text() or "192.168.1.0/24")
+        )
+        self.scan_timeout_spin.setValue(
+            max(
+                0.05,
+                min(
+                    5.0,
+                    float(defaults.get("discovery_default_timeout_seconds", self.scan_timeout_spin.value())),
+                ),
+            )
+        )
+        self.scan_max_hosts_spin.setValue(
+            max(
+                1,
+                min(
+                    4096,
+                    int(defaults.get("discovery_default_max_hosts", self.scan_max_hosts_spin.value())),
+                ),
+            )
+        )
         return discovery_window
 
     def _scan_for_printers(self) -> None:
@@ -6356,6 +8313,11 @@ QGroupBox::title {
         cidr = self.scan_cidr_edit.text().strip()
         timeout = float(self.scan_timeout_spin.value())
         max_hosts = int(self.scan_max_hosts_spin.value())
+        self.app_settings.setValue(self.DISCOVERY_DEFAULT_IP_RANGE_SETTING_KEY, cidr or "192.168.1.0/24")
+        self.app_settings.setValue(self.DISCOVERY_DEFAULT_TIMEOUT_SETTING_KEY, timeout)
+        self.app_settings.setValue(self.DISCOVERY_DEFAULT_MAX_HOSTS_SETTING_KEY, max_hosts)
+        self.app_settings.sync()
+        self.preferences_defaults = self._load_preferences_defaults()
 
         if hasattr(self, "scan_network_btn"):
             self.scan_network_btn.setEnabled(False)
@@ -8001,6 +9963,21 @@ QGroupBox::title {
             self.auto_connect_poll_timer.stop()
         if hasattr(self, "update_check_poll_timer"):
             self.update_check_poll_timer.stop()
+        if not bool(getattr(self, "build_ratios_locked", True)):
+            if hasattr(self, "wizard_content_splitter"):
+                self.wizard_outer_left_percent = self._capture_splitter_left_percent(
+                    self.wizard_content_splitter,
+                    self.wizard_outer_left_percent,
+                )
+            if hasattr(self, "wizard_package_splitter"):
+                self.wizard_package_left_percent = self._capture_splitter_left_percent(
+                    self.wizard_package_splitter,
+                    self.wizard_package_left_percent,
+                )
+            self.build_core_percent, self.build_config_percent, self.build_preview_percent = (
+                self._capture_build_panel_ratios()
+            )
+        self._persist_wizard_splitter_settings()
         self._persist_preview_settings()
         self.app_state_store.unsubscribe(self._on_app_state_changed)
         super().closeEvent(event)
