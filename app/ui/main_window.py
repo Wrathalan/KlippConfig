@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -87,6 +88,11 @@ from app.services.saved_connections import SavedConnectionService
 from app.services.saved_machine_profiles import SavedMachineProfileService
 from app.services.ssh_deploy import SSHDeployError, SSHDeployService
 from app.services.ui_scaling import UIScaleMode, UIScalingService
+from app.services.update_checker import (
+    UpdateCheckError,
+    UpdateCheckResult,
+    check_latest_release,
+)
 from app.services.validator import ValidationService
 from app.services.parity import ParityService
 from app.ui.app_state import AppStateStore
@@ -284,6 +290,40 @@ class PrinterConnectionWindow(QMainWindow):
         self.setCentralWidget(content)
 
 
+class SettingsWindow(QDialog):
+    def __init__(self, *, check_updates_on_launch: bool, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.resize(520, 220)
+
+        layout = QVBoxLayout(self)
+        general_group = QGroupBox("General", self)
+        general_layout = QVBoxLayout(general_group)
+        self.update_check_checkbox = QCheckBox(
+            "Check GitHub for updates when KlippConfig launches",
+            general_group,
+        )
+        self.update_check_checkbox.setChecked(check_updates_on_launch)
+        general_layout.addWidget(self.update_check_checkbox)
+        general_layout.addWidget(
+            QLabel("This check runs in the background and does not block the UI.", general_group)
+        )
+        layout.addWidget(general_group)
+
+        action_row = QHBoxLayout()
+        self.check_now_button = QPushButton("Check Now", self)
+        action_row.addWidget(self.check_now_button)
+        action_row.addStretch(1)
+        self.save_button = QPushButton("Save", self)
+        self.cancel_button = QPushButton("Cancel", self)
+        action_row.addWidget(self.save_button)
+        action_row.addWidget(self.cancel_button)
+        layout.addLayout(action_row)
+
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+
 class MainWindow(QMainWindow):
     MACRO_PACK_OPTIONS = {
         "core_maintenance": "Core Maintenance",
@@ -303,6 +343,9 @@ class MainWindow(QMainWindow):
         ("150", "150%"),
     )
     FILES_EXPERIMENT_SETTING_KEY = "ui/experiments/files_material_v1_enabled"
+    UPDATE_CHECK_ON_LAUNCH_SETTING_KEY = "ui/update/check_on_launch_enabled"
+    GITHUB_REPO_OWNER = "Wrathalan"
+    GITHUB_REPO_NAME = "KlippConfig"
     # Legacy keys kept only for cleanup migration from older app builds.
     SSH_AUTO_CONNECT_ENABLED_SETTING_KEY = "ui/ssh/auto_connect_enabled"
     SSH_DEFAULT_CONNECTION_SETTING_KEY = "ui/ssh/default_connection_name"
@@ -360,6 +403,7 @@ QGroupBox::title {
         saved_connection_service: SavedConnectionService | None = None,
         app_settings: QSettings | None = None,
         auto_connect_on_launch: bool = False,
+        check_updates_on_launch: bool = False,
     ) -> None:
         super().__init__()
         self.setWindowTitle(f"KlippConfig v{__version__}")
@@ -393,6 +437,17 @@ QGroupBox::title {
         self.auto_connect_poll_timer = QTimer(self)
         self.auto_connect_poll_timer.setInterval(80)
         self.auto_connect_poll_timer.timeout.connect(self._process_auto_connect_result)
+        self.check_updates_on_launch = bool(check_updates_on_launch)
+        self.update_check_on_launch_enabled = self._settings_bool(
+            self.UPDATE_CHECK_ON_LAUNCH_SETTING_KEY,
+            True,
+        )
+        self.update_check_attempted = False
+        self.update_check_in_progress = False
+        self.update_check_result_queue: SimpleQueue[dict[str, Any]] = SimpleQueue()
+        self.update_check_poll_timer = QTimer(self)
+        self.update_check_poll_timer.setInterval(100)
+        self.update_check_poll_timer.timeout.connect(self._process_update_check_result)
         self.discovery_service = PrinterDiscoveryService()
         self.ui_scaling_service = ui_scaling_service or UIScalingService()
         self.active_scale_mode: UIScaleMode = self.ui_scaling_service.resolve_mode(
@@ -403,8 +458,8 @@ QGroupBox::title {
         self.addon_options = self._build_addon_options()
         self.ui_routes = [
             RouteDefinition("home", "Home", active=True),
-            RouteDefinition("files", "Files", active=True),
             RouteDefinition("generate", "Build", active=True),
+            RouteDefinition("files", "Files", active=True),
             RouteDefinition("printers", "Printers", active=True),
             RouteDefinition("backups", "Backups", active=True),
         ]
@@ -484,6 +539,23 @@ QGroupBox::title {
         except (TypeError, ValueError):
             return default
         return max(60, value)
+
+    def _is_update_check_on_launch_enabled(self) -> bool:
+        return bool(self.update_check_on_launch_enabled)
+
+    def _set_update_check_on_launch_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        self.app_settings.setValue(self.UPDATE_CHECK_ON_LAUNCH_SETTING_KEY, target)
+        self.app_settings.sync()
+        self.update_check_on_launch_enabled = target
+        self.statusBar().showMessage(
+            (
+                "Update check on launch enabled."
+                if target
+                else "Update check on launch disabled."
+            ),
+            2500,
+        )
 
     def _clear_legacy_ssh_prefs_from_app_settings(self) -> None:
         removed = False
@@ -625,7 +697,6 @@ QGroupBox::title {
         self.left_nav_scaffold.set_routes(self.ui_routes)
         self.left_nav_scaffold.hide()
         self.bottom_status_bar = BottomStatusBar(root)
-        self.bottom_status_bar.setMinimumHeight(28)
 
         root_layout.addWidget(self.route_nav_bar)
         root_layout.addWidget(self.tabs, 1)
@@ -865,10 +936,15 @@ QGroupBox::title {
 
     def showEvent(self, event) -> None:  # noqa: ANN001
         super().showEvent(event)
-        if not self.auto_connect_on_launch or self.auto_connect_attempted:
-            return
-        self.auto_connect_attempted = True
-        QTimer.singleShot(250, self._attempt_auto_connect_saved_profile)
+        if self.check_updates_on_launch and not self.update_check_attempted:
+            self.update_check_attempted = True
+            QTimer.singleShot(
+                180,
+                lambda: self._check_for_updates(source="startup"),
+            )
+        if self.auto_connect_on_launch and not self.auto_connect_attempted:
+            self.auto_connect_attempted = True
+            QTimer.singleShot(250, self._attempt_auto_connect_saved_profile)
 
     def _attempt_auto_connect_saved_profile(self) -> None:
         if self.device_connected or self.auto_connect_in_progress:
@@ -990,6 +1066,138 @@ QGroupBox::title {
             self.statusBar().showMessage(f"Auto-connect failed for {host}", 4000)
         else:
             self.statusBar().showMessage("Auto-connect failed", 4000)
+
+    def _check_for_updates(self, *, source: str = "manual") -> None:
+        source_key = source.strip().lower() or "manual"
+        if source_key == "startup" and not self._is_update_check_on_launch_enabled():
+            return
+        if self.update_check_in_progress:
+            if source_key != "startup":
+                self.statusBar().showMessage("Update check already in progress.", 2500)
+            return
+
+        if source_key != "startup":
+            self.statusBar().showMessage("Checking GitHub for updates...", 2500)
+
+        self.update_check_in_progress = True
+        self.action_log_service.log_event("update_check", phase="start", source=source_key)
+
+        def _run_update_check() -> None:
+            try:
+                result = check_latest_release(
+                    owner=self.GITHUB_REPO_OWNER,
+                    repo=self.GITHUB_REPO_NAME,
+                    current_version=__version__,
+                )
+                self.update_check_result_queue.put(
+                    {
+                        "ok": True,
+                        "source": source_key,
+                        "result": result,
+                    }
+                )
+            except UpdateCheckError as exc:
+                self.update_check_result_queue.put(
+                    {
+                        "ok": False,
+                        "source": source_key,
+                        "error": str(exc),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.update_check_result_queue.put(
+                    {
+                        "ok": False,
+                        "source": source_key,
+                        "error": str(exc),
+                    }
+                )
+
+        threading.Thread(target=_run_update_check, name="klippconfig-update-check", daemon=True).start()
+        self.update_check_poll_timer.start()
+
+    def _process_update_check_result(self) -> None:
+        if not self.update_check_in_progress:
+            self.update_check_poll_timer.stop()
+            return
+
+        try:
+            result_payload = self.update_check_result_queue.get_nowait()
+        except Empty:
+            return
+
+        self.update_check_in_progress = False
+        self.update_check_poll_timer.stop()
+
+        source_key = str(result_payload.get("source") or "manual").strip().lower() or "manual"
+        ok = bool(result_payload.get("ok"))
+        if not ok:
+            error_message = str(result_payload.get("error") or "Unknown error.")
+            self.action_log_service.log_event(
+                "update_check",
+                phase="failed",
+                source=source_key,
+                error=error_message,
+            )
+            if source_key == "startup":
+                self.statusBar().showMessage("Update check failed.", 2500)
+            else:
+                QMessageBox.warning(self, "Update Check Failed", error_message)
+            return
+
+        check_result = result_payload.get("result")
+        if not isinstance(check_result, UpdateCheckResult):
+            self.action_log_service.log_event(
+                "update_check",
+                phase="failed",
+                source=source_key,
+                error="Unexpected update check payload.",
+            )
+            if source_key != "startup":
+                QMessageBox.warning(
+                    self,
+                    "Update Check Failed",
+                    "Unexpected response payload from update checker.",
+                )
+            return
+
+        self.action_log_service.log_event(
+            "update_check",
+            phase="complete",
+            source=source_key,
+            current_version=check_result.current_version,
+            latest_version=check_result.latest_version,
+            update_available=check_result.update_available,
+        )
+
+        if check_result.update_available:
+            message = (
+                f"Update available: v{check_result.latest_version} "
+                f"(current v{check_result.current_version})."
+            )
+            self.statusBar().showMessage(message, 5000)
+            self._show_toast_notification(message, severity="info", duration_ms=5500)
+            if source_key != "startup":
+                response = QMessageBox.question(
+                    self,
+                    "Update Available",
+                    (
+                        f"{message}\n\n"
+                        "Open the GitHub release page now?"
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if response == QMessageBox.StandardButton.Yes:
+                    QDesktopServices.openUrl(QUrl(check_result.release_url))
+            return
+
+        if source_key != "startup":
+            QMessageBox.information(
+                self,
+                "No Updates Available",
+                f"You are running the latest version (v{check_result.current_version}).",
+            )
 
     def _build_persistent_preview_panel(self, parent: QWidget) -> QWidget:
         panel = QWidget(parent)
@@ -1288,12 +1496,9 @@ QGroupBox::title {
         self._update_action_enablement()
 
     def _build_footer_connection_health(self) -> None:
-        status_bar = self.statusBar()
-        self.device_health_caption = QLabel("Device", self)
-        status_bar.addPermanentWidget(self.device_health_caption)
-        self.device_health_icon = QLabel(self)
-        self.device_health_icon.setFixedSize(12, 12)
-        status_bar.addPermanentWidget(self.device_health_icon)
+        self.statusBar().setSizeGripEnabled(False)
+        self.device_health_caption = self.bottom_status_bar.device_caption
+        self.device_health_icon = self.bottom_status_bar.device_icon
         self._set_device_connection_health(False, "No active SSH session.")
 
     def _set_device_connection_health(self, connected: bool, detail: str | None = None) -> None:
@@ -1932,6 +2137,12 @@ QGroupBox::title {
         self.help_shortcuts_action.triggered.connect(self._show_keyboard_shortcuts)
         help_menu.addAction(self.help_shortcuts_action)
 
+        self.help_check_updates_action = QAction("Check for Updates", self)
+        self.help_check_updates_action.triggered.connect(
+            lambda checked=False: self._check_for_updates(source="manual")
+        )
+        help_menu.addAction(self.help_check_updates_action)
+
         self.help_about_action = QAction("About", self)
         self.help_about_action.triggered.connect(self._show_about_window)
         help_menu.addAction(self.help_about_action)
@@ -2032,16 +2243,14 @@ QGroupBox::title {
             self._export_zip()
 
     def _open_settings_dialog(self) -> None:
-        QMessageBox.information(
-            self,
-            "Settings",
-            (
-                "Use these command-bar settings areas:\n"
-                "- View -> Theme (Dark/Light)\n"
-                "- View -> Zoom\n"
-                "- Tools -> Advanced Settings"
-            ),
+        dialog = SettingsWindow(
+            check_updates_on_launch=self._is_update_check_on_launch_enabled(),
+            parent=self,
         )
+        dialog.check_now_button.clicked.connect(lambda: self._check_for_updates(source="manual"))
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._set_update_check_on_launch_enabled(dialog.update_check_checkbox.isChecked())
 
     def _set_sidebar_visible(self, visible: bool) -> None:
         self.app_state_store.update_ui(left_nav_visible=visible)
@@ -3262,8 +3471,37 @@ QGroupBox::title {
         actions_layout.setColumnStretch(0, 1)
         actions_layout.setColumnStretch(1, 1)
 
-        layout.addWidget(actions_group)
-        layout.addStretch(1)
+        community_group = QGroupBox("Klipper + Voron Community Links", tab)
+        community_layout = QVBoxLayout(community_group)
+        community_layout.setSpacing(10)
+
+        community_intro = QLabel(
+            "Helpful official docs and community hubs.",
+            community_group,
+        )
+        community_intro.setWordWrap(True)
+        community_layout.addWidget(community_intro)
+
+        links = [
+            ("Klipper Documentation", "https://www.klipper3d.org/"),
+            ("Klipper Community Forum", "https://klipper.discourse.group/"),
+            ("Klipper GitHub", "https://github.com/Klipper3d/klipper"),
+            ("Voron Documentation", "https://docs.vorondesign.com/"),
+            ("Voron Design Website", "https://vorondesign.com/"),
+            ("Voron GitHub", "https://github.com/VoronDesign"),
+        ]
+        for label_text, url in links:
+            link_label = QLabel(
+                f'<a href="{url}">{label_text}</a>',
+                community_group,
+            )
+            link_label.setOpenExternalLinks(True)
+            link_label.setWordWrap(True)
+            community_layout.addWidget(link_label)
+
+        community_layout.addStretch(1)
+        layout.addWidget(actions_group, 1)
+        layout.addWidget(community_group, 1)
         return tab
 
     def _refresh_modify_connection_summary(self) -> None:
@@ -3489,20 +3727,17 @@ QGroupBox::title {
     def _build_wizard_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        top_row = QHBoxLayout()
-        self.render_validate_btn = QPushButton("Compile", tab)
-        self.render_validate_btn.clicked.connect(self._render_and_validate)
-        top_row.addWidget(self.render_validate_btn)
+        self.wizard_content_splitter = QSplitter(Qt.Orientation.Horizontal, tab)
+        self.wizard_content_splitter.setChildrenCollapsible(False)
+        self.wizard_content_splitter.setHandleWidth(8)
 
-        self.preset_notes_label = QLabel("", tab)
-        self.preset_notes_label.setWordWrap(True)
-        top_row.addWidget(self.preset_notes_label, 1)
-        layout.addLayout(top_row, 0)
-
-        grid = QGridLayout()
-        grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 3)
+        wizard_left_column = QWidget(self.wizard_content_splitter)
+        wizard_left_layout = QVBoxLayout(wizard_left_column)
+        wizard_left_layout.setContentsMargins(0, 0, 0, 0)
+        wizard_left_layout.setSpacing(10)
 
         wizard_group = QGroupBox("Core Hardware", tab)
         wizard_form = QFormLayout(wizard_group)
@@ -3569,7 +3804,7 @@ QGroupBox::title {
         self.bed_thermistor_edit.textChanged.connect(self._render_and_validate)
         wizard_form.addRow("Bed thermistor", self.bed_thermistor_edit)
 
-        grid.addWidget(wizard_group, 0, 0)
+        wizard_left_layout.addWidget(wizard_group, 2)
 
         options_group = QGroupBox("Macro Packs", tab)
         options_layout = QVBoxLayout(options_group)
@@ -3702,7 +3937,7 @@ QGroupBox::title {
         options_layout.addWidget(addon_details_section)
         addon_details_section.setVisible(False)
 
-        grid.addWidget(options_group, 1, 0)
+        wizard_left_layout.addWidget(options_group, 2)
 
         machine_attr_group = QGroupBox("Machine Attributes", tab)
         machine_attr_layout = QVBoxLayout(machine_attr_group)
@@ -3768,9 +4003,9 @@ QGroupBox::title {
         thermal_section_layout.addWidget(self.machine_attr_thermal_view, 1)
         machine_attr_layout.addWidget(thermal_section)
 
-        grid.addWidget(machine_attr_group, 2, 0)
+        wizard_left_layout.addWidget(machine_attr_group, 3)
 
-        package_splitter = QSplitter(Qt.Orientation.Horizontal, tab)
+        package_splitter = QSplitter(Qt.Orientation.Horizontal, self.wizard_content_splitter)
         self.wizard_package_splitter = package_splitter
 
         package_list_group = QGroupBox("Project Package", package_splitter)
@@ -3784,8 +4019,9 @@ QGroupBox::title {
 
         package_preview_group = QGroupBox("Selected File Preview", package_splitter)
         package_preview_layout = QVBoxLayout(package_preview_group)
-        self.wizard_package_preview_label = QLabel("No generated files.", package_preview_group)
+        self.wizard_package_preview_label = QLabel("", package_preview_group)
         self.wizard_package_preview_label.setWordWrap(True)
+        self.wizard_package_preview_label.setVisible(False)
         package_preview_layout.addWidget(self.wizard_package_preview_label)
         self.wizard_package_preview = QPlainTextEdit(package_preview_group)
         self.wizard_package_preview.setReadOnly(True)
@@ -3796,9 +4032,14 @@ QGroupBox::title {
 
         package_splitter.setStretchFactor(0, 1)
         package_splitter.setStretchFactor(1, 3)
-        grid.addWidget(package_splitter, 0, 1, 3, 1)
 
-        layout.addLayout(grid, 1)
+        self.wizard_content_splitter.addWidget(wizard_left_column)
+        self.wizard_content_splitter.addWidget(package_splitter)
+        self.wizard_content_splitter.setStretchFactor(0, 2)
+        self.wizard_content_splitter.setStretchFactor(1, 3)
+        self.wizard_content_splitter.setSizes([560, 840])
+
+        layout.addWidget(self.wizard_content_splitter, 1)
         return tab
 
     def _build_files_tab_experimental(self) -> QWidget:
@@ -4533,7 +4774,6 @@ QGroupBox::title {
         preset_id = self.preset_combo.currentData()
         if not isinstance(preset_id, str):
             self.current_preset = None
-            self.preset_notes_label.setText("")
             self._populate_board_combo([])
             self._populate_toolhead_board_combos([])
             self._populate_probe_types(None)
@@ -4560,7 +4800,6 @@ QGroupBox::title {
             return
 
         self.current_preset = preset
-        self.preset_notes_label.setText(preset.notes or "")
 
         available_boards = sorted(set(preset.supported_boards).union(list_main_boards()))
         available_toolheads = sorted(
@@ -5122,7 +5361,8 @@ QGroupBox::title {
 
         if self.wizard_package_file_list.count() <= 0:
             if hasattr(self, "wizard_package_preview_label"):
-                self.wizard_package_preview_label.setText("No generated files.")
+                self.wizard_package_preview_label.setText("")
+                self.wizard_package_preview_label.setVisible(False)
             if hasattr(self, "wizard_package_preview"):
                 self.wizard_package_preview.clear()
                 self.wizard_package_preview.setPlainText(
@@ -5144,19 +5384,22 @@ QGroupBox::title {
         if not hasattr(self, "wizard_package_preview"):
             return
         if self.current_pack is None:
-            self.wizard_package_preview_label.setText("No generated files.")
+            self.wizard_package_preview_label.setText("")
+            self.wizard_package_preview_label.setVisible(False)
             self.wizard_package_preview.clear()
             return
 
         item = self.wizard_package_file_list.currentItem()
         if item is None:
-            self.wizard_package_preview_label.setText("No generated files selected.")
+            self.wizard_package_preview_label.setText("")
+            self.wizard_package_preview_label.setVisible(False)
             self.wizard_package_preview.clear()
             return
 
         file_name = item.text()
         content = self.current_pack.files.get(file_name, "")
         self.wizard_package_preview_label.setText(f"Generated: {file_name}")
+        self.wizard_package_preview_label.setVisible(True)
         self.wizard_package_preview.setPlainText(content)
 
     def _update_generated_files_view(self, pack: RenderedPack | None) -> None:
@@ -7756,6 +7999,8 @@ QGroupBox::title {
     def closeEvent(self, event) -> None:  # noqa: ANN001
         if hasattr(self, "auto_connect_poll_timer"):
             self.auto_connect_poll_timer.stop()
+        if hasattr(self, "update_check_poll_timer"):
+            self.update_check_poll_timer.stop()
         self._persist_preview_settings()
         self.app_state_store.unsubscribe(self._on_app_state_changed)
         super().closeEvent(event)

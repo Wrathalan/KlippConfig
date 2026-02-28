@@ -82,16 +82,33 @@ class BottomStatusBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("bottom_status_bar")
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(24)
+        self.setMaximumHeight(30)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(8, 1, 8, 1)
+        layout.setSpacing(8)
         self.connection_label = QLabel("Disconnected", self)
         self.target_label = QLabel("Target: none", self)
         self.state_label = QLabel("State: idle", self)
         layout.addWidget(self.connection_label)
         layout.addStretch(1)
         layout.addWidget(self.target_label)
-        layout.addSpacing(12)
+        layout.addSpacing(8)
         layout.addWidget(self.state_label)
+        layout.addSpacing(10)
+        self.device_caption = QLabel("Device", self)
+        layout.addWidget(self.device_caption)
+        self.device_icon = QLabel(self)
+        self.device_icon.setFixedSize(10, 10)
+        self.device_icon.setStyleSheet(
+            "QLabel {"
+            " background-color: #dc2626;"
+            " border: 1px solid #111827;"
+            " border-radius: 5px;"
+            "}"
+        )
+        layout.addWidget(self.device_icon)
 
     def set_connection(self, connected: bool, target: str) -> None:
         self.connection_label.setText("Connected" if connected else "Disconnected")

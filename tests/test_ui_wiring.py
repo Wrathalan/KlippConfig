@@ -182,6 +182,70 @@ def test_files_experiment_builder_selected_when_enabled(qtbot, tmp_path) -> None
     assert hasattr(window, "files_dirty_chip")
 
 
+def test_update_check_on_launch_defaults_enabled(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path, "updates_default.ini")
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    assert window._is_update_check_on_launch_enabled() is True
+
+
+def test_update_check_on_launch_toggle_persists(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path, "updates_toggle.ini")
+    window = MainWindow(app_settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+
+    window._set_update_check_on_launch_enabled(False)
+    assert window._is_update_check_on_launch_enabled() is False
+    window.close()
+
+    restarted = MainWindow(app_settings=settings)
+    qtbot.addWidget(restarted)
+    restarted.show()
+    qtbot.waitUntil(lambda: restarted.preset_combo.count() > 0)
+
+    assert restarted._is_update_check_on_launch_enabled() is False
+
+
+def test_startup_update_check_respects_toggle(qtbot, tmp_path) -> None:
+    settings = _temp_settings(tmp_path, "updates_startup.ini")
+    settings.setValue(MainWindow.UPDATE_CHECK_ON_LAUNCH_SETTING_KEY, False)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings, check_updates_on_launch=True)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    qtbot.wait(350)
+
+    assert window._is_update_check_on_launch_enabled() is False
+    assert window.update_check_attempted is True
+    assert window.update_check_in_progress is False
+
+
+def test_startup_update_check_runs_when_enabled(qtbot, tmp_path, monkeypatch) -> None:
+    settings = _temp_settings(tmp_path, "updates_startup_enabled.ini")
+    settings.setValue(MainWindow.UPDATE_CHECK_ON_LAUNCH_SETTING_KEY, True)
+    settings.sync()
+
+    window = MainWindow(app_settings=settings, check_updates_on_launch=True)
+    qtbot.addWidget(window)
+
+    observed_sources: list[str] = []
+
+    def _fake_check_for_updates(*, source: str = "manual") -> None:
+        observed_sources.append(source)
+
+    monkeypatch.setattr(window, "_check_for_updates", _fake_check_for_updates)
+    window.show()
+    qtbot.waitUntil(lambda: window.preset_combo.count() > 0)
+    qtbot.waitUntil(lambda: observed_sources == ["startup"], timeout=3000)
+
+
 def test_files_experiment_stylesheet_applies_in_dark_and_light(qtbot, tmp_path) -> None:
     settings = _temp_settings(tmp_path)
     settings.setValue(MainWindow.FILES_EXPERIMENT_SETTING_KEY, True)
@@ -268,7 +332,7 @@ def test_generate_tab_header_row_stays_top_aligned_on_tall_window(qtbot) -> None
     qtbot.wait(50)
 
     tab_height = max(1, window.wizard_tab.height())
-    assert window.render_validate_btn.y() < (tab_height // 5)
+    assert window.wizard_content_splitter.y() < (tab_height // 5)
 
 
 def test_preset_defaults_to_none_and_switches_for_voron_vendor(qtbot) -> None:

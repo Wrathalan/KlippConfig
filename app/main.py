@@ -34,6 +34,7 @@ def main() -> int:
         ui_scaling_service=ui_scaling,
         active_scale_mode=resolved_mode,
         auto_connect_on_launch=True,
+        check_updates_on_launch=True,
     )
     if icon_file.exists():
         window.setWindowIcon(app.windowIcon())

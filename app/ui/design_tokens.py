@@ -74,7 +74,7 @@ def build_base_stylesheet(mode: str) -> str:
     t = tokens_for_mode(mode)
     dark_mode = normalized == "dark"
     route_hover_bg = "#134e4a" if dark_mode else "#ccfbf1"
-    route_hover_border = "#2dd4bf" if dark_mode else "#0f766e"
+    route_hover_border = "transparent"
     route_hover_text = "#ecfeff" if dark_mode else "#134e4a"
     route_checked_bg = "#f3f4f6" if dark_mode else "#e6e8ed"
     route_checked_text = "#111827"
@@ -160,7 +160,7 @@ QToolButton#route_nav_button:checked {{
     font-weight: 600;
 }}
 QToolButton#route_nav_button:checked:hover {{
-    border-color: {route_hover_border};
+    border-color: {route_checked_border};
 }}
 QGroupBox {{
     border: 1px solid {t.border_strong};
